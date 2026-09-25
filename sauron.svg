@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Sauron routing diagram: the Eye at center dispatches tasks to six AI models arranged around it.">
+  <title>sauron — one agent to route them all</title>
+  <defs>
+    <!-- backdrop -->
+    <radialGradient id="bg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#1a0a02"/>
+      <stop offset="55%" stop-color="#0b0603"/>
+      <stop offset="100%" stop-color="#050201"/>
+    </radialGradient>
+    <!-- eye corona -->
+    <radialGradient id="corona" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff2c2" stop-opacity="0.95"/>
+      <stop offset="20%" stop-color="#ffb84a"/>
+      <stop offset="55%" stop-color="#e0530b"/>
+      <stop offset="85%" stop-color="#7a1d02"/>
+      <stop offset="100%" stop-color="#2a0700" stop-opacity="0"/>
+    </radialGradient>
+    <!-- iris -->
+    <radialGradient id="iris" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#ffe28a"/>
+      <stop offset="35%" stop-color="#ff8a1c"/>
+      <stop offset="75%" stop-color="#a52a06"/>
+      <stop offset="100%" stop-color="#3a0800"/>
+    </radialGradient>
+    <!-- routing line -->
+    <linearGradient id="line" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff9a3c" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ff9a3c" stop-opacity="0.15"/>
+    </linearGradient>
+    <!-- flame filter (subtle glow) -->
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- node card -->
+    <linearGradient id="node" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#241612"/>
+      <stop offset="100%" stop-color="#120806"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- faint arcane ring -->
+  <circle cx="600" cy="315" r="260" fill="none" stroke="#3a1400" stroke-width="1" stroke-dasharray="2 6" opacity="0.55"/>
+  <circle cx="600" cy="315" r="235" fill="none" stroke="#4b1c02" stroke-width="1" opacity="0.35"/>
+
+  <!-- routing lines: center to each of 6 nodes (angles 30,90,150,210,270,330) -->
+  <!-- radius 240 for node centers -->
+  <g stroke="url(#line)" stroke-width="1.6" fill="none" opacity="0.9">
+    <line x1="600" y1="315" x2="807.85" y2="195"/>   <!--  30 -->
+    <line x1="600" y1="315" x2="600"   y2="75"/>     <!--  90 -->
+    <line x1="600" y1="315" x2="392.15" y2="195"/>   <!-- 150 -->
+    <line x1="600" y1="315" x2="392.15" y2="435"/>   <!-- 210 -->
+    <line x1="600" y1="315" x2="600"   y2="555"/>    <!-- 270 -->
+    <line x1="600" y1="315" x2="807.85" y2="435"/>   <!-- 330 -->
+  </g>
+
+  <!-- Eye of Sauron -->
+  <g transform="translate(600 315)" filter="url(#glow)">
+    <!-- outer corona: horizontal almond -->
+    <ellipse cx="0" cy="0" rx="150" ry="70" fill="url(#corona)"/>
+    <!-- iris: smaller almond -->
+    <ellipse cx="0" cy="0" rx="90" ry="45" fill="url(#iris)"/>
+    <!-- pupil: vertical slit -->
+    <ellipse cx="0" cy="0" rx="6" ry="34" fill="#0a0200"/>
+    <!-- inner highlight -->
+    <ellipse cx="-2" cy="-4" rx="3" ry="8" fill="#fff6c2" opacity="0.6"/>
+    <!-- flame tongues around corona (very stylized) -->
+    <g fill="#ff8a1c" opacity="0.75">
+      <path d="M -145 -8 Q -175 -30 -190 -60 Q -170 -35 -150 -18 Z"/>
+      <path d="M  145 -8 Q  175 -30  190 -60 Q  170 -35  150 -18 Z"/>
+      <path d="M  -80 -40 Q  -70 -70 -60 -95 Q  -55 -60 -55 -40 Z"/>
+      <path d="M   80 -40 Q   70 -70  60 -95 Q   55 -60  55 -40 Z"/>
+      <path d="M  -80  40 Q  -70  70 -60  95 Q  -55  60 -55  40 Z"/>
+      <path d="M   80  40 Q   70  70  60  95 Q   55  60  55  40 Z"/>
+    </g>
+  </g>
+
+  <!-- 6 model nodes (rounded rectangles + labels) -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" fill="#ffe6b8" text-anchor="middle">
+    <!-- top-right (30 deg) -->
+    <g transform="translate(807.85 195)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">groq</text>
+      <text y="18" font-size="12" fill="#c8a680">writing / validation</text>
+    </g>
+    <!-- top (90 deg) -->
+    <g transform="translate(600 75)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">nemotron</text>
+      <text y="18" font-size="12" fill="#c8a680">bulk reading, 1M ctx</text>
+    </g>
+    <!-- top-left (150 deg) -->
+    <g transform="translate(392.15 195)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">grok-4.1-fast</text>
+      <text y="18" font-size="12" fill="#c8a680">recon reasoning, 2M ctx</text>
+    </g>
+    <!-- bottom-left (210 deg) -->
+    <g transform="translate(392.15 435)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">flash</text>
+      <text y="18" font-size="12" fill="#c8a680">structured extraction</text>
+    </g>
+    <!-- bottom (270 deg) -->
+    <g transform="translate(600 555)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">or-free</text>
+      <text y="18" font-size="12" fill="#c8a680">generalist fallback</text>
+    </g>
+    <!-- bottom-right (330 deg) -->
+    <g transform="translate(807.85 435)">
+      <rect x="-95" y="-30" width="190" height="60" rx="8" ry="8" fill="url(#node)" stroke="#7a2a05"/>
+      <text y="-3" font-weight="700" fill="#ffb84a">pro</text>
+      <text y="18" font-size="12" fill="#c8a680">adversarial debate</text>
+    </g>
+  </g>
+
+  <!-- Title + tagline -->
+  <g font-family="Georgia, 'Times New Roman', serif" text-anchor="middle" fill="#ffe6b8">
+    <text x="600" y="602" font-size="14" opacity="0.72" letter-spacing="6">ONE AGENT TO ROUTE THEM ALL</text>
+  </g>
+
+  <!-- Corner mark -->
+  <text x="26" y="606" font-family="ui-monospace, monospace" font-size="12" fill="#5c3a20" opacity="0.9">crowx01 / sauron</text>
+</svg>

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="sauron.svg" alt="The Eye of Sauron at the center of a routing map, dispatching tasks to six AI models" width="820"/>
+</p>
+
 # sauron
 
 **One agent to route them all.**
