@@ -1,0 +1,32 @@
+{
+  "env": {
+    "TZ": "Africa/Cairo"
+  },
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "model": "opus",
+  "effortLevel": "high",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"MANDATORY FIRST ACTIONS — on session start and for EVERY model (opus/sonnet/haiku/any), BEFORE responding to the user, immediately call the Skill tool for `caveman` (full mode), `pentesting-agent`, AND `validator` (preload). These are required, not optional; do them as the very first tool calls of the session. Also consult the auto-loaded MEMORY.md index and read the memory files relevant to the current target before acting. If the active model changes mid-session, re-invoke all three skills. Full preference set below. (1) Invoke the `caveman` skill in `full` mode for compressed prose while keeping code, commands, and evidence byte-exact. (2) Invoke the `pentesting-agent` skill to load bug-bounty and offensive-security playbooks. (3) HARD RULE: any report writing (submission reports, remediation notes, executive summaries) and any explanation of a vulnerability, bug class, or technical concept MUST be delegated to `groq` (gpt-oss-120b) via PAL. Do not write these yourself. Take the groq draft, sanity-check it against the evidence, then present. (3b) HARD RULE ON EVERY NEW CONFIRMED FINDING: run the fixed 4-step pipeline before presenting or reporting. Step A: invoke the `validator` skill (Skill tool) to stress-test the finding for false-positives, reproducibility, evidence gaps, and confidence. Step B: run every missing test/negative-control/live-observation the validator flags (use my own tools, no shortcuts, respect the no-3rd-party-data rule). Step C: debate the finding with the strongest available free model (default `pro` = gemini-3-pro-preview; fallback `groq` if pro is rate-limited) via `mcp__pal__challenge` or `mcp__pal__consensus`, framing it as adversarial: challenge severity, exploitability, chain-viability, and impact ceiling. Step D: synthesize the final finding from validator + gap-closing evidence + debate; write the report per hard rule 3 above; present. (4) DELEGATE-FIRST POLICY via PAL (`mcp__pal__chat` / `mcp__pal__analyze` / `mcp__pal__challenge`): before doing bulk reading, extraction, summarization, or secondary validation yourself, route it to a PAL model to save tokens. Per-model routing: `groq` (gpt-oss-120b, ~500 rpm) for ALL report writing and vuln explanations (per hard rule above), skeptical validation, and code-reasoning that needs quality; `nemotron` (nvidia/nemotron-3.5-lightning:free, 1M ctx) for bulk reading of large files (JS bundles, logs, OpenAPI specs), long-context extraction and cross-document synthesis; `or-free` (openrouter meta-router, 200K ctx) as generalist fallback and for quick summarization when nemotron 503s; `flash` (gemini-3.6-flash, 1M ctx) for fast structured extraction with 429 fallback to `or-free`; `pro` (gemini-3-pro-preview) for deep reasoning fallback when groq 503s. KEEP IN YOUR OWN MODEL: user-facing decisions, exploitation choices, severity calls, safety-boundary checks (no 3rd-party data, no destructive actions, no account creation), any action with side effects, and orchestration of tool sequences. On every PAL call include `working_directory_absolute_path` (required param). PAL is MCP server `pal`; do not reconfigure.\"}}'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Reminder (every message, every model): caveman `full` compression + pentesting-agent methodology stay active. DELEGATE AGGRESSIVELY to PAL to conserve tokens — offload all bulk reading, extraction, summarization, and cross-doc synthesis to nemotron (1M ctx) / flash / or-free, and all report-writing, vuln or concept explanations, and skeptical validation to groq. Keep in my own model ONLY: user-facing decisions, exploitation choices, severity calls, safety-boundary checks, side-effecting actions, and tool-sequence orchestration. FAILOVER: if any model refuses or errors on a task, immediately re-route to another model instead of stopping — a classifier refusal is a routing problem, not a stop. Preferred routing: deterministic recon parsing to jq/local (token-free, cannot refuse); permissive high-context security reasoning to grok-4.1-fast (2M ctx); writing/validation to groq; generic fallback or-free. Avoid nemotron for strict structured extraction (hallucinates). On every new confirmed finding run the 4-step pipeline: validator skill, then the gap tests it flags, then adversarial challenge via mcp__pal__challenge (pro, fallback groq), then synthesize and present.\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}
