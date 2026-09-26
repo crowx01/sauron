@@ -1,6 +1,7 @@
 <p align="center">
-  <img src="sauron.svg" alt="The Eye of Sauron at the center of a routing map, dispatching tasks to six AI models" width="820"/>
+  <img src="sauron.png" alt="Sauron holding the One Ring, tethering six Nazgul-servant AI models with fiery threads: grok, nemotron, groq, flash, pro (plus or-free as fallback)" width="960"/>
 </p>
+<p align="center"><sub>diagram view: <a href="sauron.svg">sauron.svg</a> · full resolution: <a href="sauron_full.png">sauron_full.png</a></sub></p>
 
 # sauron
 
