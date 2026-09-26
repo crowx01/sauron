@@ -1,3 +1,6 @@
 *.local
 *.key
 .env
+labels_overlay.svg
+sauron_flux_clean*
+sauron_labeled_v*
