@@ -148,10 +148,15 @@ fi
 # (critical: jq `. * $add` REPLACES arrays; we need to append so other frameworks' hooks survive)
 if [ -f "$TARGET" ]; then
   jq --argjson add "$JSON" '
+    # dedupe helper: append new hook entries only when no existing entry has an identical command string
+    def dedupe(cur; added):
+      (cur // []) as $c
+      | (added // []) as $a
+      | $c + ($a | map(select(. as $new | $c | map(.hooks[0].command // "") | index($new.hooks[0].command // "") | not)));
     . as $orig
     | ($orig * ($add | del(.hooks)))
-    | .hooks.SessionStart     = (($orig.hooks.SessionStart     // []) + ($add.hooks.SessionStart     // []))
-    | .hooks.UserPromptSubmit = (($orig.hooks.UserPromptSubmit // []) + ($add.hooks.UserPromptSubmit // []))
+    | .hooks.SessionStart     = dedupe($orig.hooks.SessionStart;     $add.hooks.SessionStart)
+    | .hooks.UserPromptSubmit = dedupe($orig.hooks.UserPromptSubmit; $add.hooks.UserPromptSubmit)
   ' "$TARGET" > "${TARGET}.tmp" && mv "${TARGET}.tmp" "$TARGET"
   ok "merged into $TARGET (existing hooks preserved, sauron hooks appended)"
 else

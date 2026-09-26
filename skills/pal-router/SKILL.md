@@ -1,3 +1,12 @@
+---
+name: pal-router
+description: >-
+  Delegate-first + failover doctrine for the framework. Dispatches sub-tasks to cheaper or free PAL
+  models so Claude Opus's context stays reserved for judgment. Triggers on: 'route this to a
+  cheaper model', 'delegate this read', 'who should write this report', 'which model do I use for
+  X', 'gemini refused, what now'.
+---
+
 # pal-router
 
 **One-line pitch:** Delegate-first + failover doctrine skill for the sauron framework. Dispatches sub-tasks to cheaper or free PAL models so Claude Opus's context stays reserved for judgment.

@@ -1,3 +1,11 @@
+---
+name: validator
+description: >-
+  Skeptical QA reviewer skill for offensive-security findings. Runs the sauron 4-step validation
+  pipeline before any finding is reported. Triggers on: 'validate this finding', 'before I submit',
+  'check my PoC', 'is this a false positive', 'score this severity'.
+---
+
 # validator
 
 **One-line pitch:** Skeptical QA reviewer skill for offensive-security findings. Runs the sauron framework's 4-step validation pipeline before any finding is reported.
