@@ -74,6 +74,8 @@ git clone https://github.com/crowx01/sauron && cd sauron
 
 Full walkthrough from cold box to shipping a finding: **[docs/WORKFLOW.md](docs/WORKFLOW.md)**.
 
+See a full picture-book walkthrough of the wizard + what Claude sees at boot: **[docs/install-walkthrough.pdf](docs/install-walkthrough.pdf)** (4 pages, fire-palette rendering).
+
 > Prefer to skip the wizard? Copy `settings.example.json` to `~/.claude/settings.json` (or `./.claude/settings.json` for per-project) and edit it by hand. `setup.sh` is just a friendlier way to produce the same file.
 
 Then restart Claude Code.
