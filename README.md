@@ -59,7 +59,7 @@ If any model refuses, times out, or errors, immediately re-route to another mode
 
 ```bash
 # 1. Get the PAL MCP server (fork of zen-mcp-server) and register it in ~/.claude.json
-git clone https://github.com/BeehiveInnovations/zen-mcp-server /home/kali/tools/zen-mcp-server
+git clone https://github.com/BeehiveInnovations/zen-mcp-server ~/tools/zen-mcp-server
 
 # 2. Get sauron and run the interactive setup
 git clone https://github.com/crowx01/sauron && cd sauron
@@ -73,6 +73,8 @@ git clone https://github.com/crowx01/sauron && cd sauron
 - **Backup.** Any existing `settings.json` gets a timestamped `.bak` before write.
 
 Full walkthrough from cold box to shipping a finding: **[docs/WORKFLOW.md](docs/WORKFLOW.md)**.
+
+> Prefer to skip the wizard? Copy `settings.example.json` to `~/.claude/settings.json` (or `./.claude/settings.json` for per-project) and edit it by hand. `setup.sh` is just a friendlier way to produce the same file.
 
 Then restart Claude Code.
 

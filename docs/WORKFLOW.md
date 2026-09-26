@@ -11,9 +11,18 @@ From cold box to shipping a finding, without burning Claude's context on busy wo
    - **Auto-load skills.** Pick which skills fire as the first tool calls of every session (caveman, pentesting-agent, validator).
    - **Delegate-first policy.** Pick which PAL models you have keys for (groq, nemotron, grok, flash, or-free, pro). Unselected models are dropped from the rendered hook so Claude never tries to route to them.
 4. Fill in your API keys in the generated `.env.sauron.example` and source it from your shell rc.
-5. Symlink each chosen skill into the skills folder Claude Code discovers from:
-   - Global install: `~/.claude/skills/`
-   - Per-project install: `./.claude/skills/`
+5. Symlink each chosen skill into the skills folder Claude Code discovers from. `setup.sh` will offer to do this for you; the manual equivalent:
+   ```bash
+   # global install
+   SAURON=~/tools/sauron   # path to your local sauron clone
+   mkdir -p ~/.claude/skills
+   for d in "$SAURON"/skills/*/; do ln -sfn "$d" ~/.claude/skills/$(basename "$d"); done
+
+   # per-project install (run from the project root)
+   SAURON=~/tools/sauron
+   mkdir -p ./.claude/skills
+   for d in "$SAURON"/skills/*/; do ln -sfn "$d" ./.claude/skills/$(basename "$d"); done
+   ```
 6. Restart Claude Code so the new hook takes effect.
 
 ## 2. Every session boot (automatic, ~2s)
