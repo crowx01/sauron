@@ -55,15 +55,26 @@ Full spec: [skills/validator/SKILL.md](skills/validator/SKILL.md).
 
 If any model refuses, times out, or errors, immediately re-route to another model. A classifier refusal is a routing problem, not a stop.
 
-## Install (3 steps)
+## Install
 
-1. Install PAL MCP server (fork of zen-mcp-server): https://github.com/BeehiveInnovations/zen-mcp-server. Register it in your Claude Code MCP config.
-2. Copy the hooks:
-   ```bash
-   cp settings.example.json ~/.claude/settings.json
-   ```
-   Then set `GEMINI_API_KEY` and other provider keys via environment variables. Do not hardcode secrets.
-3. Restart Claude Code.
+```bash
+# 1. Get the PAL MCP server (fork of zen-mcp-server) and register it in ~/.claude.json
+git clone https://github.com/BeehiveInnovations/zen-mcp-server /home/kali/tools/zen-mcp-server
+
+# 2. Get sauron and run the interactive setup
+git clone https://github.com/crowx01/sauron && cd sauron
+./setup.sh
+```
+
+`setup.sh` walks you through:
+- **Scope.** Global (`~/.claude/settings.json`, loads every session everywhere) or per-project (`./.claude/settings.json`, only loads when Claude Code runs in that project). Per-project is the default so the framework does not attach to unrelated work.
+- **Auto-load skills.** Pick which skills fire at session start (caveman, pentesting-agent, validator).
+- **Delegate-first policy.** Pick which PAL models you have keys for. Unselected models are dropped from the rendered hook.
+- **Backup.** Any existing `settings.json` gets a timestamped `.bak` before write.
+
+Full walkthrough from cold box to shipping a finding: **[docs/WORKFLOW.md](docs/WORKFLOW.md)**.
+
+Then restart Claude Code.
 
 ## Real-world lessons
 
