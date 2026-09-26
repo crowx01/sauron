@@ -18,12 +18,22 @@ hd()   { printf '\n%s%s%s\n' "$BOLD" "$*" "$RST"; }
 command -v jq >/dev/null || { err "jq is required (apt install jq)"; exit 1; }
 
 # ---------- banner ----------
-cat <<'EOF'
-
-              sauron  ·  interactive setup
-        one agent to route them all
-
-EOF
+# ANSI 256 palette for the fire look:  208 = bright orange, 214 = amber, 220 = gold
+ORG=$'\033[38;5;208m'; AMB=$'\033[38;5;214m'; GLD=$'\033[38;5;220m'; EMB=$'\033[38;5;202m'
+printf '\n'
+printf '%s              .-~~~-.               %s\n'                   "$RED" "$RST"
+printf '%s            .%s(   %so   %s).%s              %s\n'  "$RED" "$GLD" "$EMB" "$GLD" "$RED" "$RST"
+printf '%s             ~-...-~                %s\n'                   "$RED" "$RST"
+printf '\n'
+printf '%s     ███████╗ █████╗ ██╗   ██╗██████╗  ██████╗ ███╗   ██╗%s\n' "$ORG" "$RST"
+printf '%s     ██╔════╝██╔══██╗██║   ██║██╔══██╗██╔═══██╗████╗  ██║%s\n' "$ORG" "$RST"
+printf '%s     ███████╗███████║██║   ██║██████╔╝██║   ██║██╔██╗ ██║%s\n' "$AMB" "$RST"
+printf '%s     ╚════██║██╔══██║██║   ██║██╔══██╗██║   ██║██║╚██╗██║%s\n' "$AMB" "$RST"
+printf '%s     ███████║██║  ██║╚██████╔╝██║  ██║╚██████╔╝██║ ╚████║%s\n' "$GLD" "$RST"
+printf '%s     ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝%s\n' "$GLD" "$RST"
+printf '\n'
+printf '%s          %sinteractive setup%s   %s.%s   one agent to route them all%s\n' "$DIM" "$BOLD" "$RST$DIM" "$AMB" "$RST$DIM" "$RST"
+printf '\n'
 
 # ---------- 1. scope ----------
 hd "1. Where should the hooks install?"
