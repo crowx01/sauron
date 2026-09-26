@@ -35,8 +35,25 @@ printf '\n'
 printf '%s          %sinteractive setup%s   %s.%s   one agent to route them all%s\n' "$DIM" "$BOLD" "$RST$DIM" "$AMB" "$RST$DIM" "$RST"
 printf '\n'
 
+# ---------- 0. orchestrator ----------
+hd "0. Which agent orchestrator do you use?"
+cat <<EOF
+  ${CYN}c${RST}) claude-code    (default)   full: hooks + Skill() invocations + delegate policy
+  ${CYN}r${RST}) cursor                     writes .cursor/rules/FRAMEWORK.mdc (alwaysApply)
+  ${CYN}l${RST}) cline                      writes .clinerules with the delegate policy
+  ${CYN}x${RST}) codex-cli (OpenAI)         writes ~/.codex/instructions.md
+  ${CYN}a${RST}) aider                      writes .aider.conf.yml + FRAMEWORK.md conventions
+  ${CYN}g${RST}) generic / other            writes SYSTEM_PROMPT.md you paste into any tool
+EOF
+read -rp "choice [c/r/l/x/a/g] (default: c): " ORCH
+ORCH="${ORCH:-c}"
+case "$ORCH" in
+  c|r|l|x|a|g) ok "orchestrator: $ORCH" ;;
+  *) err "invalid orchestrator"; exit 1 ;;
+esac
+
 # ---------- 1. scope ----------
-hd "1. Where should the hooks install?"
+hd "1. Where should it install?"
 cat <<EOF
   ${CYN}g${RST}) global      → ~/.claude/settings.json         (loads every session, every project)
   ${CYN}p${RST}) per-project → \$PWD/.claude/settings.json      (only loads when Claude Code runs here)
@@ -45,12 +62,11 @@ EOF
 read -rp "choice [g/p/s] (default: p): " SCOPE
 SCOPE="${SCOPE:-p}"
 case "$SCOPE" in
-  g) TARGET="$HOME/.claude/settings.json" ;;
-  p) TARGET="$PWD/.claude/settings.json" ;;
-  s) TARGET="" ;;
-  *) err "invalid choice"; exit 1 ;;
+  g|p) TARGET="" ;;  # resolved later, after we know both ORCH and SCOPE
+  s)   TARGET="" ;;  # dry-run: no write
+  *)   err "invalid scope"; exit 1 ;;
 esac
-[ -n "$TARGET" ] && ok "target: $TARGET" || ok "target: stdout (dry run)"
+[ "$SCOPE" = "s" ] && ok "target: stdout (dry run)"
 
 # ---------- 2. skill auto-load ----------
 hd "2. Which skills should auto-load at session start?"
@@ -126,11 +142,39 @@ JSON=$(jq -n --arg ss "$SS_CMD" --arg ups "$UPS_CMD" '{
 }')
 
 # ---------- 6. write or dry-run ----------
-if [ -z "$TARGET" ]; then
-  hd "settings.json (dry run - copy manually):"
-  echo "$JSON"
+if [ "$SCOPE" = "s" ]; then
+  hd "config (dry run - copy manually):"
+  case "$ORCH" in
+    c) echo "$JSON" ;;
+    *) printf '# SessionStart-equivalent\n%s\n\n# UserPromptSubmit-equivalent\n%s\n' "$SS_TEXT" "$UPS_TEXT" ;;
+  esac
   exit 0
 fi
+
+# ---------- 5. resolve TARGET based on orchestrator + scope ----------
+case "$ORCH" in
+  c) case "$SCOPE" in
+       g) TARGET="$HOME/.claude/settings.json" ;;
+       p) TARGET="$PWD/.claude/settings.json" ;;
+     esac ;;
+  r) case "$SCOPE" in
+       g) TARGET="$HOME/.cursor/rules/sauron.mdc" ;;
+       p) TARGET="$PWD/.cursor/rules/sauron.mdc" ;;
+     esac ;;
+  l) case "$SCOPE" in
+       g) TARGET="$HOME/.clinerules" ;;
+       p) TARGET="$PWD/.clinerules" ;;
+     esac ;;
+  x) TARGET="$HOME/.codex/instructions.md" ;;
+  a) case "$SCOPE" in
+       g) TARGET="$HOME/.aider.sauron.md" ;;
+       p) TARGET="$PWD/.aider.sauron.md" ;;
+     esac ;;
+  g) case "$SCOPE" in
+       g) TARGET="$HOME/SYSTEM_PROMPT.sauron.md" ;;
+       p) TARGET="$PWD/SYSTEM_PROMPT.sauron.md" ;;
+     esac ;;
+esac
 
 hd "Ready to write ${TARGET}"
 say "  Existing file will be backed up with .bak.<timestamp> suffix."
@@ -144,29 +188,112 @@ if [ -f "$TARGET" ]; then
   ok "backup: $BAK"
 fi
 
-# merge: preserve existing top-level keys AND append to any existing hook arrays
-# (critical: jq `. * $add` REPLACES arrays; we need to append so other frameworks' hooks survive)
-if [ -f "$TARGET" ]; then
-  jq --argjson add "$JSON" '
-    # dedupe helper: append new hook entries only when no existing entry has an identical command string
-    def dedupe(cur; added):
-      (cur // []) as $c
-      | (added // []) as $a
-      | $c + ($a | map(select(. as $new | $c | map(.hooks[0].command // "") | index($new.hooks[0].command // "") | not)));
-    . as $orig
-    | ($orig * ($add | del(.hooks)))
-    | .hooks.SessionStart     = dedupe($orig.hooks.SessionStart;     $add.hooks.SessionStart)
-    | .hooks.UserPromptSubmit = dedupe($orig.hooks.UserPromptSubmit; $add.hooks.UserPromptSubmit)
-  ' "$TARGET" > "${TARGET}.tmp" && mv "${TARGET}.tmp" "$TARGET"
-  ok "merged into $TARGET (existing hooks preserved, sauron hooks appended)"
-else
-  echo "$JSON" | jq . > "$TARGET"
-  ok "wrote $TARGET"
-fi
+# ---------- 6. write in the format for the chosen orchestrator ----------
+case "$ORCH" in
+  c)
+    # Claude Code: merge JSON hooks (preserve existing, dedup identical)
+    if [ -f "$TARGET" ]; then
+      jq --argjson add "$JSON" '
+        def dedupe(cur; added):
+          (cur // []) as $c
+          | (added // []) as $a
+          | $c + ($a | map(select(. as $new | $c | map(.hooks[0].command // "") | index($new.hooks[0].command // "") | not)));
+        . as $orig
+        | ($orig * ($add | del(.hooks)))
+        | .hooks.SessionStart     = dedupe($orig.hooks.SessionStart;     $add.hooks.SessionStart)
+        | .hooks.UserPromptSubmit = dedupe($orig.hooks.UserPromptSubmit; $add.hooks.UserPromptSubmit)
+      ' "$TARGET" > "${TARGET}.tmp" && mv "${TARGET}.tmp" "$TARGET"
+      ok "merged into $TARGET (existing hooks preserved, sauron hooks appended)"
+    else
+      echo "$JSON" | jq . > "$TARGET"
+      ok "wrote $TARGET"
+    fi
+    ;;
+  r)
+    # Cursor: .mdc rules file with frontmatter alwaysApply:true
+    cat > "$TARGET" <<MDC
+---
+description: sauron framework - delegate-first + failover doctrine
+alwaysApply: true
+---
+
+# sauron rules
+
+## Session context (equivalent to Claude Code SessionStart)
+$SS_TEXT
+
+## Every-message reminder (equivalent to Claude Code UserPromptSubmit)
+$UPS_TEXT
+MDC
+    ok "wrote Cursor rules: $TARGET"
+    ;;
+  l)
+    # Cline: .clinerules plain markdown at project root or home
+    cat > "$TARGET" <<CLR
+# sauron rules for Cline
+
+## Doctrine
+$SS_TEXT
+
+## On every message
+$UPS_TEXT
+CLR
+    ok "wrote Cline rules: $TARGET"
+    ;;
+  x)
+    # Codex CLI: instructions.md in ~/.codex
+    cat > "$TARGET" <<CDX
+# sauron instructions for Codex CLI
+
+$SS_TEXT
+
+---
+$UPS_TEXT
+CDX
+    ok "wrote Codex instructions: $TARGET"
+    ;;
+  a)
+    # Aider: convention file referenced from .aider.conf.yml
+    cat > "$TARGET" <<AID
+# sauron conventions for Aider
+
+$SS_TEXT
+
+$UPS_TEXT
+AID
+    ok "wrote Aider convention file: $TARGET"
+    warn "  add this line to your .aider.conf.yml:  read: [$TARGET]"
+    ;;
+  g)
+    # Generic: portable SYSTEM_PROMPT.md
+    cat > "$TARGET" <<GEN
+# sauron SYSTEM PROMPT (portable)
+
+Paste the contents below into your orchestrator's system prompt or rules file.
+
+---
+
+$SS_TEXT
+
+---
+
+$UPS_TEXT
+
+---
+
+## How to use with any AI agent
+1. Copy the two sections above into your orchestrator's system prompt.
+2. If your orchestrator supports per-message rules, put the second section there.
+3. Skill invocations (Skill(x)) are Claude Code-only. On other orchestrators,
+   reference the skill by name in your prompt and cite the SKILL.md content.
+GEN
+    ok "wrote generic system prompt: $TARGET"
+    ;;
+esac
 
 # ---------- 6b. optional: symlink shipped skills so Claude Code can discover them ----------
 SKILLS_SRC="$SCRIPT_DIR/skills"
-if [ -d "$SKILLS_SRC" ]; then
+if [ "$ORCH" = "c" ] && [ -d "$SKILLS_SRC" ]; then
   case "$SCOPE" in
     g) SKILLS_DST="$HOME/.claude/skills" ;;
     p) SKILLS_DST="$PWD/.claude/skills" ;;
@@ -189,8 +316,8 @@ if [ -d "$SKILLS_SRC" ]; then
   esac
 fi
 
-# ---------- 6c. sanity-check: is PAL registered in ~/.claude.json? ----------
-if [ -f "$HOME/.claude.json" ]; then
+# ---------- 6c. sanity-check: is PAL registered in ~/.claude.json? (Claude Code only) ----------
+if [ "$ORCH" = "c" ] && [ -f "$HOME/.claude.json" ]; then
   if jq -e '.mcpServers.pal // (.projects | to_entries[]?.value.mcpServers.pal)' "$HOME/.claude.json" >/dev/null 2>&1; then
     ok "PAL MCP server is registered in ~/.claude.json"
   else
@@ -200,6 +327,46 @@ if [ -f "$HOME/.claude.json" ]; then
   fi
 else
   warn "~/.claude.json not found; make sure PAL is registered before starting Claude Code"
+fi
+
+# ---------- 6d. copy skill files for non-Claude orchestrators ----------
+# For non-Claude, the model can't invoke Skill() directly, but it can still read
+# the SKILL.md content. Copy skills into a sibling folder so the rules file can
+# reference them and the other model has the same knowledge.
+if [ "$ORCH" != "c" ] && [ -d "$SKILLS_SRC" ]; then
+  SKILLS_MIRROR="$(dirname "$TARGET")/sauron-skills"
+  read -rp "copy skill files into $SKILLS_MIRROR so the model can read them? [Y/n]: " a
+  case "${a:-y}" in
+    y|Y)
+      mkdir -p "$SKILLS_MIRROR"
+      for d in "$SKILLS_SRC"/*/; do
+        name=$(basename "$d")
+        dst="$SKILLS_MIRROR/$name"
+        if [ -e "$dst" ] && [ ! -L "$dst" ] && [ ! -d "$dst" ]; then
+          warn "skipping $name: destination exists and is not a directory or symlink"
+          continue
+        fi
+        # cp -a preserves LICENSE and any scripts/references; a symlink would be
+        # portable but is less friendly for user editing on non-Claude tools.
+        cp -a "$d" "$SKILLS_MIRROR/" 2>/dev/null && ok "copied $name -> $dst"
+      done
+      # append a short pointer to the rules file so the other model knows the skills exist
+      case "$ORCH" in
+        r|l|x|a|g)
+          {
+            echo
+            echo "## Skills available (read these when their trigger phrases appear)"
+            for d in "$SKILLS_MIRROR"/*/; do
+              n=$(basename "$d")
+              echo "- \`$n\`: see [$n/SKILL.md](sauron-skills/$n/SKILL.md)"
+            done
+          } >> "$TARGET"
+          ok "appended skills index to $TARGET"
+          ;;
+      esac
+      ;;
+    *) warn "skipped skill copy; the model won't see skill descriptions" ;;
+  esac
 fi
 
 # ---------- 7. .env template for API keys ----------
@@ -224,12 +391,51 @@ fi
 
 # ---------- 8. next steps ----------
 hd "Next steps"
-cat <<EOF
+case "$ORCH" in
+  c)
+    cat <<EOF
   1. Register PAL as an MCP server in ~/.claude.json:
      ${DIM}"mcpServers": { "pal": { "type": "stdio", "command": "/path/to/zen-mcp-server/.pal_venv/bin/python", "args": ["/path/to/zen-mcp-server/server.py"], "env": { ...keys... } } }${RST}
   2. Source your API keys: ${CYN}source $(dirname "$TARGET")/.env.sauron.example${RST}   (after editing it)
   3. Restart Claude Code.
   4. On the next session start you should see the auto-invoked skills fire immediately.
-
 EOF
+    ;;
+  r)
+    cat <<EOF
+  1. Source your API keys: source $(dirname "$TARGET")/.env.sauron.example
+  2. Open your project in Cursor; .cursor/rules/*.mdc apply automatically.
+  3. Ask the model to read sauron-skills/<name>/SKILL.md when trigger phrases appear.
+EOF
+    ;;
+  l)
+    cat <<EOF
+  1. Source your API keys: source $(dirname "$TARGET")/.env.sauron.example
+  2. Cline reads .clinerules automatically.
+  3. Ask Cline to read sauron-skills/<name>/SKILL.md when triggers appear.
+EOF
+    ;;
+  x)
+    cat <<EOF
+  1. Source your API keys.
+  2. Codex CLI reads ~/.codex/instructions.md as base prompt.
+  3. Skill files are pointed to from the instructions.
+EOF
+    ;;
+  a)
+    cat <<EOF
+  1. Source your API keys.
+  2. Add to your .aider.conf.yml:  ${CYN}read: [$TARGET]${RST}
+  3. Skill files copied next to conventions.
+EOF
+    ;;
+  g)
+    cat <<EOF
+  1. Paste $TARGET contents into your orchestrator's system prompt.
+  2. Skill files sit at $(dirname "$TARGET")/sauron-skills/.
+  3. Source your API keys.
+EOF
+    ;;
+esac
+echo
 ok "sauron setup complete."
