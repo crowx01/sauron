@@ -82,3 +82,94 @@ Both adapted from [amElnagdy/review-skills](https://github.com/amElnagdy/review-
 > Delegate the prose, never the evidence.
 
 > A model refusal is a routing problem, not a stop.
+
+## Lifecycle at a glance
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ONE-TIME INSTALL (~5 min)                                                  │
+│                                                                            │
+│    $ git clone https://github.com/crowx01/sauron ~/tools/sauron            │
+│    $ cd ~/tools/sauron && ./setup.sh                                       │
+│                                                                            │
+│    ┌── setup.sh ─────────────────────────────────────────┐                 │
+│    │ [1] scope?    g=global | p=per-project (default)   │                 │
+│    │ [2] skills?   caveman? pentesting-agent? validator? │                 │
+│    │ [3] models?   groq? nemotron? grok? flash?          │                 │
+│    │               or-free? pro?                         │                 │
+│    │ [4] proceed?  back up existing then MERGE (append,  │                 │
+│    │               never clobber other frameworks)       │                 │
+│    │ [5] symlink?  ln -sfn skills/* into .claude/skills/ │                 │
+│    │ [6] PAL check on ~/.claude.json                     │                 │
+│    │ [7] env template next to settings.json              │                 │
+│    └─────────────────────────────────────────────────────┘                 │
+│                                                                            │
+│         writes:  <scope>/.claude/settings.json       (SS + UPS hooks)      │
+│                  <scope>/.claude/.env.sauron.example (only chosen keys)    │
+│                  <scope>/.claude/skills/*   -> symlinks to your clone      │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    |
+                                    v
+┌────────────────────────────────────────────────────────────────────────────┐
+│ EVERY SESSION BOOT (~2s, automatic)                                        │
+│                                                                            │
+│    Claude Code starts                                                      │
+│           |                                                                │
+│           v                                                                │
+│    SessionStart hook fires  ->  additionalContext = "invoke caveman +      │
+│           |                       pentesting-agent + validator;            │
+│           |                       delegate-first policy; failover..."      │
+│           v                                                                │
+│    First three tool calls: Skill(caveman), Skill(pentesting-agent),        │
+│                            Skill(validator)                                │
+│           |                                                                │
+│           v                                                                │
+│    Ready. You type your first prompt.                                      │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    |
+                                    v
+┌────────────────────────────────────────────────────────────────────────────┐
+│ EVERY MESSAGE                                                              │
+│                                                                            │
+│    you> "deep-recon target.com"                                            │
+│           |                                                                │
+│           v                                                                │
+│    UserPromptSubmit hook -> re-asserts delegate-first + failover           │
+│           |                                                                │
+│           v                                                                │
+│    Claude picks tools (STAYS IN CLAUDE)                                    │
+│           |                                                                │
+│    +------+-------+-------+------+                                         │
+│    v      v       v      v      v                                          │
+│  subfinder amass httpx  gau  nuclei    (local, 0 tokens)                   │
+│           |                                                                │
+│           v                                                                │
+│    parse route?                                                            │
+│      +---- deterministic  ->  jq / grep locally (0 tokens)                 │
+│      +---- LLM reasoning  ->  PAL(grok, 2M ctx)                            │
+│      +---- huge JS bundle ->  PAL(nemotron, 1M ctx)                        │
+│      +---- structured     ->  PAL(flash) -> fallback or-free               │
+│      +---- report writeup ->  PAL(groq) -> Claude byte-checks              │
+│      +---- model refused? ->  auto re-route (never a stop)                 │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    |
+                                    v
+┌────────────────────────────────────────────────────────────────────────────┐
+│ WHEN A FINDING LANDS (fixed 4-step pipeline)                               │
+│                                                                            │
+│    A. Skill(validator) -> 12-field verdict                                 │
+│           |                                                                │
+│    B. Gap tests with your tools                                            │
+│       (no 3rd-party PII, no destructive, no account creation)              │
+│           |                                                                │
+│    C. mcp__pal__challenge(finding, model=pro; fallback=groq)               │
+│       adversarial: severity, exploitability, chain, impact ceiling         │
+│           |                                                                │
+│    D. Synthesize (validator + gap evidence + debate)                       │
+│       PAL(groq) drafts prose                                               │
+│       Claude byte-checks every hostname/URL/token/CVSS vs raw evidence     │
+│           |                                                                │
+│           v                                                                │
+│    YOU submit under your identity                                          │
+└────────────────────────────────────────────────────────────────────────────┘
+```
