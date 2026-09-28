@@ -304,12 +304,20 @@ export function fetchSpec(t, pr, commitsText) {
 
 function stripHtml(html) {
   if (!html) return '';
-  return String(html)
+  let out = String(html)
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|tr|h\d)>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+    .replace(/<\/(p|div|li|tr|h\d)>/gi, '\n');
+
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]+>/g, '');
+  } while (out !== prev);
+
+  return out
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/[<>]/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
