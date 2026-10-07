@@ -67,6 +67,20 @@ def _think() -> str:
     return random.choice(_THINK_VERBS)
 
 
+_SMALLTALK_RE = re.compile(
+    r"^(hi|hey+|hello|yo|sup|thx|thanks?|thank you|ok(ay)?|cool|nice|great|awesome|"
+    r"got it|gg|lol|nvm|bye|good (morning|afternoon|evening|night)|how are you|"
+    r"what'?s up|who are you|what can you do|help)\b[\s!.?]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_smalltalk(line: str) -> bool:
+    """A greeting / pleasantry / 'who are you' — answer conversationally, no
+    tools (so 'hi' just replies instead of spinning up the tool loop)."""
+    return bool(_SMALLTALK_RE.match((line or "").strip()))
+
+
 class _ReplState:
     """Shared mutable UI state the prompt session, bottom toolbar and the main
     loop all read (perm mode, current model, cwd)."""
@@ -102,18 +116,23 @@ if _PT_OK:
                     yield Completion(cmd, start_position=-len(text), display=cmd)
 
 
+def _print_tool(name, args, res) -> None:
+    """Minimal monochrome tool trace: '⏺ tool(args)' then an indented '⎿ result'
+    (both dim; the accent marker is the only colour, red only on error)."""
+    shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args, default=str)
+    console.print(Text.assemble(("⏺ ", _ACCENT), (f"{name}(", "dim"), (str(shown)[:100], "dim"), (")", "dim")))
+    lines = str(res).strip().splitlines() or [""]
+    extra = len(lines) - 1
+    tail = f"  (+{extra} line{'s' if extra != 1 else ''})" if extra > 0 else ""
+    if str(res).lower().startswith("error"):
+        console.print(Text.assemble(("  ⎿ ", "dim"), (lines[0][:160], "red"), (tail, "dim")))
+    else:
+        console.print(Text.assemble(("  ⎿ ", "dim"), (lines[0][:160], "dim"), (tail, "dim")))
+
+
 def _render_tools(transcript) -> None:
-    """Claude-Code-style tool trace: ⏺ Tool(args) then an indented ⎿ result."""
     for name, args, res in transcript:
-        shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args, default=str)
-        console.print(Text.assemble(("⏺ ", "bold cyan"),
-                                     (name, "bold"), ("(", "dim"), (str(shown)[:100], "cyan"), (")", "dim")))
-        first = (str(res).strip().splitlines() or [""])[0]
-        extra = max(0, len(str(res).strip().splitlines()) - 1)
-        tail = f"  (+{extra} more line{'s' if extra != 1 else ''})" if extra else ""
-        glyph = "✗" if str(res).lower().startswith("error") else "⎿"
-        gstyle = "red" if glyph == "✗" else "dim"
-        console.print(Text.assemble((f"  {glyph} ", gstyle), (first[:160], "dim"), (tail, "dim")))
+        _print_tool(name, args, res)
 
 
 # one specific role (system instruction) per command, so each behaves for its job
@@ -445,7 +464,7 @@ _TOOLS_SYS_FULL = (
 
 
 async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, full: bool = False,
-                      history_preamble: str = "", system_preamble: str = ""):
+                      history_preamble: str = "", system_preamble: str = "", on_tool=None):
     """ReAct loop calling the provider directly (not the chat tool, which blocks
     tool-shaped output): the model emits <tool_call>, PAL runs it locally on
     Kali, feeds back <tool_result>, until the model answers with no tool call.
@@ -564,6 +583,8 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                                '"url":"..."}}</tool_call> (actions: http_send, search_traffic, jwt_decode, '
                                'jwt_forge, jwt_none_attack, compare_responses, send_parallel).')
                         transcript.append((name, args, res))
+                        if on_tool:
+                            on_tool(name, args, res)
                         results.append(react.format_result(name, res))
                         continue
                     if _cmd and not _cmd.lstrip().startswith("cd "):
@@ -596,6 +617,8 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                         "Give your final answer now with NO tool_call.)"
                     )
                     transcript.append((name, args, res))
+                    if on_tool:
+                        on_tool(name, args, res)
                     results.append(react.format_result(name, res))
                     continue
                 seen_calls.add(sig)
@@ -610,6 +633,8 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                            "backgrounded or GUI launch this means it started "
                            "successfully — do not repeat it.)")
                 transcript.append((name, args, res))
+                if on_tool:
+                    on_tool(name, args, res)
                 results.append(react.format_result(name, res))
             convo = (
                 f"{convo}\n\n{text}\n\n"
@@ -635,7 +660,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
 
 
 async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False,
-                           history_preamble: str = "", system_preamble: str = ""):
+                           history_preamble: str = "", system_preamble: str = "", on_tool=None):
     """Phase 6: try each model in ``pool`` in order until one returns a clean
     (non-error, non-refusal) answer -- fallover across the whole tool-capable
     model pool, not just retries within one provider (fallback_chain still
@@ -651,7 +676,7 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     for model in pool or []:
         ans, transcript = await _tools_loop(
             task, model, cwd, max_steps=max_steps, full=full,
-            history_preamble=history_preamble, system_preamble=system_preamble,
+            history_preamble=history_preamble, system_preamble=system_preamble, on_tool=on_tool,
         )
         last_ans, last_transcript, last_model = ans, transcript, model
         if ans.startswith("__ERROR__"):
@@ -663,47 +688,38 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     return last_ans, last_transcript, last_model
 
 
-# ---- consistent visual language --------------------------------------------
-# One glyph + color per message kind so every surface (notices, bubbles, tool
-# trace) reads the same: the user can tell input / assistant / tool / warning /
-# error / system apart at a glance without reading the words.
-_GLYPH = {
-    "pal": "◆", "tools": "⚙", "agent": "✦", "debate": "⚖",
-    "sys": "·", "warn": "⚠", "err": "✗", "ok": "✓", "route": "→",
-}
-_STYLE = {
-    "pal": "green", "tools": "cyan", "agent": "magenta", "debate": "blue",
-    "sys": "dim", "warn": "yellow", "err": "red", "ok": "green", "route": "dim",
-}
+# ---- minimal monochrome visual language ------------------------------------
+# Claude-Code-like restraint: default foreground for the assistant's words,
+# dim/grey for everything secondary (tool trace, notices, meta), one muted
+# accent reserved for the prompt marker and logo, red only for errors.
+_ACCENT = "#c8762f"  # single muted brand accent; used sparingly
 
 
 def _note(msg: str, kind: str = "sys") -> None:
-    """One-line status line with a consistent glyph+color for its kind."""
-    console.print(f"[{_STYLE.get(kind, 'dim')}]{_GLYPH.get(kind, '·')} {msg}[/]")
+    """A single dim status line. Errors are the only coloured note (red)."""
+    if kind == "err":
+        console.print(f"[red]✗ {msg}[/]")
+    else:
+        console.print(f"[dim]{msg}[/]")
 
 
-def _panel(body, title: str, *, glyph: str = "▸", border: str = "cyan") -> Panel:
-    """A titled panel in the shared visual language: a glyph + bold title in
-    the border color, left-aligned, same padding everywhere."""
+def _panel(body, title: str, *, glyph: str = "", border: str = "grey42") -> Panel:
+    """A quiet titled panel: dim grey border, dim title, no bright colour."""
     return Panel(
         body,
-        title=Text(f"{glyph} {title}", style=f"bold {border}"),
+        title=Text(title, style="dim"),
         title_align="left",
         border_style=border,
         padding=(0, 1),
     )
 
 
-def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = None) -> Panel:
-    color = color or _STYLE.get(role, "green")
-    glyph = _GLYPH.get(role, "◆")
+def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = None):
+    """Render an assistant answer plainly — no box, no colour. Errors are red
+    text. (Kept as a function so every call site stays minimal and uniform.)"""
     if answer.startswith("__ERROR__"):
-        body: object = Text(answer[len("__ERROR__") :], style="red")
-        color, glyph = "red", _GLYPH["err"]
-    else:
-        body = Markdown(answer)
-    title = Text.assemble((f"{glyph} {role}", f"bold {color}"), (f"  ·  {model}", "dim"))
-    return Panel(body, title=title, title_align="left", border_style=color, padding=(0, 1))
+        return Text(answer[len("__ERROR__") :].strip(), style="red")
+    return Markdown(answer)
 
 
 # ---- self-contained in-session conversation context (Phase 3) --------------
@@ -872,7 +888,7 @@ async def _stream_chat(model: str, prompt: str, history: list[dict], role: str |
     preamble = _ctx_render(history)
     full_prompt = f"{preamble}{prompt}" if preamble else prompt
 
-    console.print(Text.assemble((f"{_GLYPH['pal']} ", "bold green"), (model, "bold green"), ("  streaming…", "dim")))
+    console.print(Text("⏺ ", style=_ACCENT), end="")  # minimal assistant marker, then stream
     buf: list[str] = []
 
     def _on_delta(piece: str) -> None:
@@ -994,14 +1010,9 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
     def _toolbar():
         if state is None:
             return None
-        home = os.path.expanduser("~")
-        cwd = state.cwd.replace(home, "~", 1) if state.cwd.startswith(home) else state.cwd
-        arrows = "⏵⏵" if state.perm == "auto" else "⏵"
         return HTML(
-            f" <b>{arrows} {_PERM_LABEL[state.perm]}</b> "
-            f"<style fg='#888888'>(shift+tab to cycle)</style>  "
-            f"<style fg='#888888'>·</style>  {state.model or 'auto'}  "
-            f"<style fg='#888888'>·</style>  <style fg='#888888'>{cwd}</style>"
+            f"<style fg='#888888'>{_PERM_LABEL[state.perm]}  ·  shift+tab  ·  "
+            f"{state.model or 'auto'}</style>"
         )
 
     return PromptSession(
@@ -1013,7 +1024,7 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
         completer=_SlashCompleter() if _PT_OK else None,
         complete_while_typing=True,
         bottom_toolbar=_toolbar,
-        placeholder=HTML("<style fg='#666666'>Type a message, / for commands, Shift+Tab for mode…</style>"),
+        placeholder=HTML("<style fg='#666666'>Type a message, / for commands…</style>"),
     )
 
 
@@ -1025,9 +1036,9 @@ async def _read_line(session, cwd: str) -> str:
     """
     if session is not None:
         with patch_stdout():
-            text = await session.prompt_async([("class:prompt", "you › ")])
+            text = await session.prompt_async([("class:prompt", "> ")])
         return text.strip()
-    return (await asyncio.to_thread(console.input, "[bold]you[/] › ")).strip()
+    return (await asyncio.to_thread(console.input, "[dim]>[/] ")).strip()
 
 
 def _models_table() -> str:
@@ -1105,7 +1116,7 @@ _LOGO = [
     " ▀██▄ █ ▄██▀ ",
     "   ▀█████▀   ",
 ]
-_LOGO_STYLES = ["bold #ffd061", "bold #ffab24", "bold #ff8a1c", "bold #ff6a12", "bold #c62a04"]
+_LOGO_STYLES = [f"bold {_ACCENT}"] * 5  # single muted accent, no rainbow
 _BRAND = "#ff8a1c"
 
 
@@ -1135,7 +1146,6 @@ def _banner(cheap: str | None, smart: str | None, **ctx):
     home = os.path.expanduser("~")
     cwd_disp = (cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd) if cwd else ""
     plan_only = ctx.get("plan_only", _claude_plan_only())
-    orch_present = ctx.get("orch_present")
     exec_mode = "engine-only" if plan_only else "claude+engine"
     ver = _version()
 
@@ -1143,12 +1153,10 @@ def _banner(cheap: str | None, smart: str | None, **ctx):
     for i, row in enumerate(_LOGO):
         logo.append(row + ("\n" if i < len(_LOGO) - 1 else ""), style=_LOGO_STYLES[i])
 
+    # Minimal, monochrome identity: accent only on the name; everything else dim.
     ident = Group(
-        Text.assemble(("sauron", f"bold {_BRAND}"), (f"  v{ver}" if ver else "", "dim"),
-                      ("   one agent to route them all", "dim")),
-        Text.assemble((str(model), "green"), ("  ·  ", "dim"),
-                      (exec_mode, "magenta"), ("  ·  ", "dim"),
-                      ("self-contained", "cyan")),
+        Text.assemble(("sauron", f"bold {_ACCENT}"), (f"  v{ver}" if ver else "", "dim")),
+        Text(f"{model}  ·  {exec_mode}  ·  self-contained", style="dim"),
         Text(cwd_disp, style="dim"),
     )
     grid = Table.grid(padding=(0, 3))
@@ -1156,14 +1164,8 @@ def _banner(cheap: str | None, smart: str | None, **ctx):
     grid.add_column(vertical="middle")
     grid.add_row(logo, ident)
 
-    orch_line = (f"claude plans · engine executes ({_orchestrator_cli()} present)" if orch_present
-                 else f"no {_orchestrator_cli()} orchestrator · self-orchestrating on engine")
-    status = Text.assemble(
-        ("Self-contained engine. ", "bold"),
-        (f"{orch_line}  ·  persistent sessions  ·  auto-debate on huge tasks.", "bold"),
-    )
-    hint = Text("/help for commands  ·  /status for posture  ·  /resume to continue  ·  /exit", style="dim")
-    return Group(grid, Text(""), status, hint)
+    hint = Text("/help  ·  shift+tab for mode  ·  /exit", style="dim")
+    return Group(grid, Text(""), hint)
 
 
 def _available_models() -> list[str]:
@@ -1463,12 +1465,9 @@ async def _run(handle):
         console.print(_banner(r0["cheap"], r0["smart"], **_wctx()))
 
     _show_welcome()
-    _sm = _smartest_models(3, need_tools=True)
-    if _sm:
-        _note(f"engine models: {', '.join(_sm)}", "route")
     prior = session_store.latest()
     if prior and prior.get("turns"):
-        _note(f"resume last session {prior['id']} ({prior['turns']} turns): /resume  ·  list: /resume list", "sys")
+        _note(f"{prior['turns']} turns from your last session — /resume to continue", "sys")
 
     session = None
     if _PT_OK and sys.stdin.isatty():
@@ -1545,8 +1544,8 @@ async def _run(handle):
                 console.print("[dim]no conversation yet[/]")
             else:
                 body = "\n\n".join(
-                    (f"[bold]› you[/]: {t['content']}" if t["role"] == "user"
-                     else f"[bold green]{_GLYPH['pal']} sauron[/]: {t['content']}")
+                    (f"[dim]> you[/]  {t['content']}" if t["role"] == "user"
+                     else f"[dim]⏺ sauron[/]  {t['content']}")
                     for t in history
                 )
                 console.print(_panel(body, f"history · {len(history)} turns", glyph="≡"))
@@ -1912,8 +1911,27 @@ async def _run(handle):
             last_answer = ans
             continue
 
-        # DEFAULT: every plain message EXECUTES with tools on Kali -- no /tools
-        # prefix needed. Pick the selected model (if set via /model) else a pool.
+        # Smalltalk / greetings answer conversationally — no tools, no box —
+        # so "hi" just replies (streamed when possible), like Claude Code.
+        if _is_smalltalk(line):
+            r = chat_router.route(line, _is_available)
+            cm = selected_model or r.get("cheap") or r.get("model")
+            if cm:
+                if _stream_on(session):
+                    ans = await _stream_chat(cm, line, history, role="chat")
+                    if ans.startswith("__ERROR__"):
+                        console.print(_bubble(cm, ans))
+                else:
+                    with console.status(f"[dim]{_think()}…[/]", spinner="dots"):
+                        ans = await _ask_chat(cm, line, history, role="chat")
+                    console.print(_bubble(cm, ans))
+                _ctx_append(history, "user", line)
+                _ctx_append(history, "assistant", ans)
+                _persist()
+                last_answer = ans
+                continue
+
+        # DEFAULT: a real task runs with tools. Pick the selected model or a pool.
         from providers.router import tools_pool
 
         if selected_model:
@@ -1926,29 +1944,25 @@ async def _run(handle):
         if not pool or not pool[0]:
             console.print("[red]no model available — check `pal diag`[/]")
             continue
-        # Permission mode (Shift+Tab cycles it): auto runs full; read-only uses
-        # the non-mutating allowlist; ask confirms once before full tools.
+        # Permission mode (Shift+Tab cycles it): auto/full, ask-first, or read-only.
         full = state.perm != "read-only"
         if state.perm == "ask":
             try:
-                ok = await asyncio.to_thread(console.input, "[yellow]⏵ run with full tools on this box? [y/N][/] ")
+                ok = await asyncio.to_thread(console.input, "[dim]> run with full tools? [y/N][/] ")
             except (EOFError, KeyboardInterrupt):
                 ok = ""
-            if ok.strip().lower() not in ("y", "yes"):
-                full = False
-                _note("running read-only (not approved for full tools)", "sys")
-        if full and not tools_full_warned:
-            _note(f"every message runs with FULL tools here (any shell command) — /ask for plain chat. cwd: {cwd}",
-                  "warn")
-            tools_full_warned = True
-        _note(f"{pool[0]} · tools ({'full' if full else 'read-only'})", "route")
+            full = ok.strip().lower() in ("y", "yes")
         preamble = _ctx_render(history)
-        with console.status(f"[dim]{_think()}… ({pool[0]})[/]", spinner="dots"):
+        with console.status(f"[dim]{_think()}…[/]", spinner="dots"):
             ans, transcript, used = await _tools_loop_pool(
-                line, pool, cwd, max_steps=8 if full else 5, full=full, history_preamble=preamble
+                line, pool, cwd, max_steps=8 if full else 5, full=full,
+                history_preamble=preamble, on_tool=_print_tool,
             )
-        _render_tools(transcript)
-        console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
+        if ans.startswith("__ERROR__"):
+            console.print(_bubble(used, ans))
+        else:
+            console.print(Text("⏺ ", style=_ACCENT), end="")
+            console.print(Markdown(ans))
         _ctx_append(history, "user", line)
         _ctx_append(history, "assistant", ans)
         _persist()
@@ -1964,10 +1978,7 @@ async def _run(handle):
                 _note("debate gate skipped", "sys")
                 verdict = None
             if verdict:
-                _ok = verdict.startswith("verdict: COMPLETE")
-                console.print(_panel(Text(verdict), "debate validation",
-                                     glyph=(_GLYPH["ok"] if _ok else _GLYPH["warn"]),
-                                     border=("green" if _ok else "yellow")))
+                console.print(_panel(Text(verdict, style="dim"), "debate validation"))
 
 
 def _quiet_logging() -> None:
