@@ -264,6 +264,30 @@ def _smartest_models(n: int = 3, *, need_tools: bool = True, is_available=None) 
     return out
 
 
+def _claude_plan_only() -> bool:
+    """Policy: use the external Claude orchestrator for PLANNING only, never for
+    execution, so execution never spends Claude tokens. Default on; set
+    PAL_CLAUDE_PLAN_ONLY=0 to let Claude execute agent tasks as before."""
+    return os.getenv("PAL_CLAUDE_PLAN_ONLY", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _agent_backend(role: str, orchestrator_available: bool) -> str:
+    """Which backend runs an /agent role: 'claude' (external orchestrator) or
+    'engine' (self-orchestrate on the smartest local models).
+
+    Under the plan-only policy Claude is reachable ONLY for the planner role;
+    every execution role (default/edit/review) runs on engine models regardless
+    of whether the Claude CLI is installed. With the policy off, Claude handles
+    any role when available (legacy behavior). Claude is never used when the CLI
+    is absent.
+    """
+    if not orchestrator_available:
+        return "engine"
+    if _claude_plan_only():
+        return "claude" if role == "planner" else "engine"
+    return "claude"
+
+
 # tags used by the ReAct tool loop; hidden from the final rendered answer
 _TOOL_TAGS = re.compile(r"<tool_call>.*?</tool_call>|<tool_result[^>]*>.*?</tool_result>", re.DOTALL)
 
@@ -1139,12 +1163,17 @@ async def _run(handle):
             f"[dim]↳ last session [bold]{prior['id']}[/] has {prior['turns']} turn(s) — "
             "/resume to restore it, or /resume list[/]"
         )
-    if not _orchestrator_available():
-        _sm = _smartest_models(3, need_tools=True)
-        if _sm:
+    _sm = _smartest_models(3, need_tools=True)
+    if _sm:
+        if not _orchestrator_available():
             console.print(
-                f"[dim]no external orchestrator ('{_orchestrator_cli()}') found — /agent will "
-                f"self-orchestrate on the smartest models: {', '.join(_sm)}[/]"
+                f"[dim]no external orchestrator ('{_orchestrator_cli()}') found — /agent runs on the "
+                f"smartest engine models: {', '.join(_sm)}[/]"
+            )
+        elif _claude_plan_only():
+            console.print(
+                f"[dim]claude = planning only (saves tokens) — /agent:plan uses claude; all execution "
+                f"runs on engine models: {', '.join(_sm)}[/]"
             )
 
     session = None
@@ -1286,41 +1315,48 @@ async def _run(handle):
                 console.print("[dim]usage: /agent[:edit|:plan|:review] <task>[/]")
                 continue
             label = {"default": "read-only", "edit": "EDIT", "planner": "plan", "codereviewer": "review"}[role]
-            if role == "edit" and not agent_warned:
-                console.print(
-                    Panel(
-                        Text.assemble(
-                            ("⚠ /agent:edit runs the local ", "yellow"),
-                            ("claude", "bold yellow"),
-                            (" CLI with ", "yellow"),
-                            ("acceptEdits", "bold red"),
-                            (f" — it can run commands and EDIT files under\n{cwd}\n", "yellow"),
-                            ("plain /agent is read-only (edits blocked).", "dim"),
-                        ),
-                        border_style="yellow",
-                        padding=(0, 1),
-                    )
-                )
-                agent_warned = True
-            if _orchestrator_available():
-                with console.status(f"[dim]claude agent ({label}) working…[/]", spinner="dots"):
+            backend = _agent_backend(role, _orchestrator_available())
+            if backend == "claude":
+                # Claude is used for PLANNING only (plan-only policy) — no tokens
+                # are spent on execution here.
+                with console.status(f"[dim]claude planning ({label})…[/]", spinner="dots"):
                     ans = await _ask_agent(handle, task, cwd, role)
-                console.print(_bubble(f"claude · {label}", ans, role="agent", color="magenta"))
+                console.print(_bubble(f"claude · {label} (plan)", ans, role="agent", color="magenta"))
+                _ctx_append(history, "user", line)
+                _ctx_append(history, "assistant", ans)
+                _persist()
+                last_answer = ans
+                console.print("[dim]plan ready — execute it on engine models with /feed (or /plan <goal>)[/]")
             else:
-                # No external orchestrator -> self-contained fallback on the
-                # smartest available models, primed with the orchestrator role.
+                # Execution stays self-dependent: run on the smartest local
+                # models, primed with the orchestrator role. Claude is never
+                # invoked for execution.
                 pool = _smartest_models(3, need_tools=True)
                 if not pool:
-                    console.print("[red]no orchestrator CLI and no capable model available — check `pal diag`[/]")
+                    console.print("[red]no capable engine model available — check `pal diag`[/]")
                     continue
-                full_edit = role in ("edit",)
+                full_edit = role == "edit"
+                if full_edit and not agent_warned:
+                    console.print(
+                        Panel(
+                            Text.assemble(
+                                ("⚠ /agent:edit executes on ENGINE models with full tools", "bold yellow"),
+                                (f" — they can run commands and EDIT files under\n{cwd}\n", "yellow"),
+                                ("plain /agent is read-only. Only use on authorized systems.", "dim"),
+                            ),
+                            border_style="yellow", padding=(0, 1),
+                        )
+                    )
+                    agent_warned = True
                 task_hint = {
                     "planner": "Produce a concrete step-by-step plan (do not execute). ",
                     "codereviewer": "Review rigorously and report issues by severity. ",
                 }.get(role, "")
+                why = ("claude = planning only" if _orchestrator_available()
+                       else f"no '{_orchestrator_cli()}' orchestrator")
                 console.print(
-                    f"[dim]no '{_orchestrator_cli()}' orchestrator found → self-orchestrating on "
-                    f"smartest models: {', '.join(pool)} ({'EDIT' if full_edit else 'read-only'})[/]"
+                    f"[dim]{why} → executing on engine models: "
+                    f"{', '.join(pool)} ({'EDIT' if full_edit else 'read-only'})[/]"
                 )
                 with console.status(f"[dim]{pool[0]} orchestrating ({label})…[/]", spinner="dots"):
                     ans, transcript, used = await _tools_loop_pool(

@@ -52,11 +52,29 @@ async def run_task(
 
     cwd = os.getcwd()
     if mode == "agent":
-        from server import handle_call_tool
-
         role = agent_role or ("edit" if full else "default")
-        ans = await chat_repl._ask_agent(handle_call_tool, task, cwd, role)
-        return {"task": task, "mode": "agent", "role": role, "result": ans}
+        # Plan-only policy: Claude is used for planning only; execution roles run
+        # on engine models so a scripted agent run spends no Claude tokens.
+        if chat_repl._agent_backend(role, chat_repl._orchestrator_available()) == "claude":
+            from server import handle_call_tool
+
+            ans = await chat_repl._ask_agent(handle_call_tool, task, cwd, role)
+            return {"task": task, "mode": "agent", "role": role, "backend": "claude", "result": ans}
+        pool = chat_repl._smartest_models(3, need_tools=True)
+        if not pool:
+            return {"task": task, "mode": "agent", "role": role, "result": "__ERROR__no engine model available"}
+        hint = {
+            "planner": "Produce a concrete step-by-step plan (do not execute). ",
+            "codereviewer": "Review rigorously and report issues by severity. ",
+        }.get(role, "")
+        ans, transcript, used = await chat_repl._tools_loop_pool(
+            hint + task, pool, cwd, max_steps=8 if role == "edit" else 6,
+            full=(role == "edit"), system_preamble=chat_repl._ORCHESTRATOR_SYS,
+        )
+        return {
+            "task": task, "mode": "agent", "role": role, "backend": "engine", "model": used,
+            "tools_used": [{"tool": n, "args": a} for n, a, _ in transcript], "result": ans,
+        }
 
     m = _pick_tools_model(task, model)
     if not m:

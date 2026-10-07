@@ -291,7 +291,7 @@ if [ -n "$SKILLS_LIST" ]; then
 else
   SS_TEXT="Doctrine + routing map are in CLAUDE.md at the project root (already loaded)."
 fi
-UPS_TEXT="Every message: DEFAULT TO PAL for each task (bulk read/extract to nemotron/flash, write/validate to groq per CLAUDE.md routing); pre-filter recon output locally first ($BIN_DIR/sauron-normalize, $BIN_DIR/strip-noise); keep only decisions/severity/safety/side-effects in Claude; failover on refusal, never stop."
+UPS_TEXT="Every message: Claude PLANS and decides only — it does NOT execute. Route ALL execution to the PAL engine (bulk read/extract to nemotron/flash, write/validate to groq, tool loops/recon/scans/edits to the tool-capable model pool, per CLAUDE.md routing); pre-filter recon output locally first ($BIN_DIR/sauron-normalize, $BIN_DIR/strip-noise). Keep ONLY planning, decisions, severity/safety judgments and side-effect approval in Claude to save tokens; everything else runs on engine models. Failover on refusal, never stop."
 
 # ---------- 4. render settings.json ----------
 build_cmd () {

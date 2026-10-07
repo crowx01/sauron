@@ -267,6 +267,33 @@ def test_smartest_models_ranks_by_intelligence_and_tools(monkeypatch):
     assert out == ["smart-tool", "mid-tool"]   # highest-intelligence tool-capable, no no-tool model
 
 
+def test_claude_plan_only_default_and_off(monkeypatch):
+    monkeypatch.delenv("PAL_CLAUDE_PLAN_ONLY", raising=False)
+    assert chat_repl._claude_plan_only() is True
+    monkeypatch.setenv("PAL_CLAUDE_PLAN_ONLY", "0")
+    assert chat_repl._claude_plan_only() is False
+
+
+def test_agent_backend_plan_only_claude_plans_engine_executes(monkeypatch):
+    monkeypatch.delenv("PAL_CLAUDE_PLAN_ONLY", raising=False)  # policy on
+    # Claude available: only planning uses it; execution roles -> engine.
+    assert chat_repl._agent_backend("planner", True) == "claude"
+    assert chat_repl._agent_backend("edit", True) == "engine"
+    assert chat_repl._agent_backend("default", True) == "engine"
+    assert chat_repl._agent_backend("codereviewer", True) == "engine"
+    # Claude unavailable: everything (planning included) runs on the engine.
+    assert chat_repl._agent_backend("planner", False) == "engine"
+    assert chat_repl._agent_backend("edit", False) == "engine"
+
+
+def test_agent_backend_policy_off_is_legacy(monkeypatch):
+    monkeypatch.setenv("PAL_CLAUDE_PLAN_ONLY", "0")
+    # legacy: Claude handles any role when available
+    assert chat_repl._agent_backend("edit", True) == "claude"
+    assert chat_repl._agent_backend("default", True) == "claude"
+    assert chat_repl._agent_backend("edit", False) == "engine"
+
+
 def test_smartest_models_falls_back_to_router(monkeypatch):
     from providers.router import catalog, chat_router
 

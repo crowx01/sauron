@@ -80,9 +80,20 @@ Installing sauron gives you the `sauron` CLI, which drives the bundled core engi
 **`sauron chat`** is a self-contained interactive assistant — chat and the tool loop go straight through the engine's router (classifier routing, capability-matched fallback, refusal-memory, credential masking), so it needs no running MCP server. It keeps a **persistent in-session context**: every plain message runs with full tools on the box (**qwen3** on Groq is the default tool executor) and remembers prior turns, so follow-ups build on what came before instead of starting from zero. Commands:
 
 - `/ask | /cheap | /smart <q>` — plain chat (no tools) for one message
-- `/agent[:edit|:plan|:review] <task>` — full local Claude Code · `/debate` · `/delegate <model> <q>`
-- `/context` · `/history` · `/compact` (summarize older turns) · `/clear` (reset)
+- `/agent[:edit|:plan|:review] <task>` — Claude **plans**, engine models **execute** (see below) · `/debate` · `/delegate <model> <q>`
+- `/context` · `/history` · `/compact` (summarize older turns) · `/clear` (reset) · `/resume [id|list]` (persists across restarts)
 - `/model` · `/models` · `/help` · `/exit`
+
+**Claude plans, the engine executes (token-saving, default).** To keep Claude's
+token spend to a minimum, the external Claude orchestrator is used for
+**planning only** — `/agent:plan` drafts a plan on Claude, and every execution
+role (`/agent`, `/agent:edit`, `/agent:review`) runs on the **smartest available
+engine models**, primed with an orchestrator-aware system prompt, never on
+Claude. If no Claude CLI is present, planning also falls back to engine models,
+so the engine is fully self-dependent. Set `PAL_CLAUDE_PLAN_ONLY=0` to let Claude
+execute agent tasks as before. **Huge/high-stakes tasks** are additionally
+validated through the `executor→reviewer→judge` debate panel before the answer
+is trusted (`PAL_CHAT_AUTODEBATE=0` to disable).
 
 Routing learns from outcomes (`sauron distill`). Details: [pal-router](skills/pal-router/SKILL.md).
 
