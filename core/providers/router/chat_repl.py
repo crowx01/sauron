@@ -197,6 +197,73 @@ async def _ask_agent(handle, task: str, cwd: str, role: str = "default"):
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
+# ---- orchestrator fallback onto the smartest models ------------------------
+# `/agent` normally bridges to an external orchestrator (the local `claude`
+# CLI). When none is installed, Sauron stays self-dependent: it falls back to
+# the SMARTEST available tool-capable models, primed with an orchestrator-aware
+# system prompt so they drive the task end-to-end themselves.
+
+_ORCHESTRATOR_SYS = (
+    "You are now acting as the Sauron orchestrator itself. No external agent "
+    "(Claude Code / Cursor / Codex) is available on this machine, so YOU own this "
+    "task end-to-end using the local tools.\n"
+    "Operating doctrine: decompose the task into concrete steps; take the cheapest "
+    "correct action first; run ONE tool at a time and verify each result before the "
+    "next; stay strictly within the operator's authorization scope; and stop and "
+    "report plainly once the objective is met. You were selected because you are "
+    "among the most capable models configured — reason carefully and do not punt.\n\n"
+)
+
+
+def _orchestrator_cli() -> str:
+    return os.getenv("PAL_ORCHESTRATOR_CLI", "claude").strip() or "claude"
+
+
+def _orchestrator_available() -> bool:
+    """True when an external orchestrator CLI is callable. PAL_ORCHESTRATOR=none
+    forces the self-contained fallback even if the CLI is installed."""
+    import shutil
+
+    if os.getenv("PAL_ORCHESTRATOR", "").strip().lower() in ("none", "off", "0", "self"):
+        return False
+    return shutil.which(_orchestrator_cli()) is not None
+
+
+def _smartest_models(n: int = 3, *, need_tools: bool = True, is_available=None) -> list[str]:
+    """The ``n`` smartest AVAILABLE models by catalog intelligence, tool-capable
+    when ``need_tools``. Falls back to the chat_router smart pick if the catalog
+    is empty. These are the models the orchestrator role is applied to."""
+    is_available = is_available or _is_available
+    out: list[str] = []
+    try:
+        from providers.router import catalog
+
+        cat = catalog.routing_catalog()
+        ranked = sorted(
+            (e for e in cat.entries if e.routable and (not need_tools or e.tools is True)),
+            key=lambda e: (-e.intelligence, e.cost_rank, e.provider, e.model),
+        )
+        for e in ranked:
+            for name in (e.model, *e.aliases):
+                if is_available(name) and name not in out:
+                    out.append(name)
+                    break
+            if len(out) >= n:
+                break
+    except Exception:  # noqa: BLE001 - degrade to the router's smart pick below
+        pass
+    if not out:
+        try:
+            from providers.router import chat_router
+
+            smart = chat_router.route("code", is_available).get("smart")
+            if smart:
+                out = [smart]
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 # tags used by the ReAct tool loop; hidden from the final rendered answer
 _TOOL_TAGS = re.compile(r"<tool_call>.*?</tool_call>|<tool_result[^>]*>.*?</tool_result>", re.DOTALL)
 
@@ -279,7 +346,7 @@ _TOOLS_SYS_FULL = (
 
 
 async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, full: bool = False,
-                      history_preamble: str = ""):
+                      history_preamble: str = "", system_preamble: str = ""):
     """ReAct loop calling the provider directly (not the chat tool, which blocks
     tool-shaped output): the model emits <tool_call>, PAL runs it locally on
     Kali, feeds back <tool_result>, until the model answers with no tool call.
@@ -301,7 +368,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     prov = ModelProviderRegistry.get_provider_for_model(model)
     if prov is None:
         return (f"__ERROR__no provider for {model}", [])
-    system = _maybe_security(task, (_TOOLS_SYS_FULL if full else _TOOLS_SYS) + schema)
+    system = (system_preamble or "") + _maybe_security(task, (_TOOLS_SYS_FULL if full else _TOOLS_SYS) + schema)
     # Universal tool transport: gpt-oss/gpt-5/o3/... emit calls through the
     # structured function-calling channel, not text tags, so pass them an
     # openai tools schema and read structured tool_calls back. Text-tag models
@@ -458,7 +525,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
 
 
 async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False,
-                           history_preamble: str = ""):
+                           history_preamble: str = "", system_preamble: str = ""):
     """Phase 6: try each model in ``pool`` in order until one returns a clean
     (non-error, non-refusal) answer -- fallover across the whole tool-capable
     model pool, not just retries within one provider (fallback_chain still
@@ -473,7 +540,8 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     last_model = pool[0] if pool else None
     for model in pool or []:
         ans, transcript = await _tools_loop(
-            task, model, cwd, max_steps=max_steps, full=full, history_preamble=history_preamble
+            task, model, cwd, max_steps=max_steps, full=full,
+            history_preamble=history_preamble, system_preamble=system_preamble,
         )
         last_ans, last_transcript, last_model = ans, transcript, model
         if ans.startswith("__ERROR__"):
@@ -1071,6 +1139,13 @@ async def _run(handle):
             f"[dim]↳ last session [bold]{prior['id']}[/] has {prior['turns']} turn(s) — "
             "/resume to restore it, or /resume list[/]"
         )
+    if not _orchestrator_available():
+        _sm = _smartest_models(3, need_tools=True)
+        if _sm:
+            console.print(
+                f"[dim]no external orchestrator ('{_orchestrator_cli()}') found — /agent will "
+                f"self-orchestrate on the smartest models: {', '.join(_sm)}[/]"
+            )
 
     session = None
     if _PT_OK and sys.stdin.isatty():
@@ -1227,9 +1302,40 @@ async def _run(handle):
                     )
                 )
                 agent_warned = True
-            with console.status(f"[dim]claude agent ({label}) working…[/]", spinner="dots"):
-                ans = await _ask_agent(handle, task, cwd, role)
-            console.print(_bubble(f"claude · {label}", ans, role="agent", color="magenta"))
+            if _orchestrator_available():
+                with console.status(f"[dim]claude agent ({label}) working…[/]", spinner="dots"):
+                    ans = await _ask_agent(handle, task, cwd, role)
+                console.print(_bubble(f"claude · {label}", ans, role="agent", color="magenta"))
+            else:
+                # No external orchestrator -> self-contained fallback on the
+                # smartest available models, primed with the orchestrator role.
+                pool = _smartest_models(3, need_tools=True)
+                if not pool:
+                    console.print("[red]no orchestrator CLI and no capable model available — check `pal diag`[/]")
+                    continue
+                full_edit = role in ("edit",)
+                task_hint = {
+                    "planner": "Produce a concrete step-by-step plan (do not execute). ",
+                    "codereviewer": "Review rigorously and report issues by severity. ",
+                }.get(role, "")
+                console.print(
+                    f"[dim]no '{_orchestrator_cli()}' orchestrator found → self-orchestrating on "
+                    f"smartest models: {', '.join(pool)} ({'EDIT' if full_edit else 'read-only'})[/]"
+                )
+                with console.status(f"[dim]{pool[0]} orchestrating ({label})…[/]", spinner="dots"):
+                    ans, transcript, used = await _tools_loop_pool(
+                        task_hint + task, pool, cwd, max_steps=8 if full_edit else 6,
+                        full=full_edit, history_preamble=_ctx_render(history),
+                        system_preamble=_ORCHESTRATOR_SYS,
+                    )
+                for name, args, _res in transcript:
+                    shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
+                    console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+                console.print(_bubble(f"{used} · self-orchestrator", ans, role="agent", color="magenta"))
+                _ctx_append(history, "user", line)
+                _ctx_append(history, "assistant", ans)
+                _persist()
+                last_answer = ans
             continue
 
         # /tools <task> -> FULL power by default (any command + all tools).

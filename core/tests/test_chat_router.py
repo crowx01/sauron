@@ -210,6 +210,74 @@ async def test_ask_chat_error_is_sentinel(monkeypatch):
     assert "provider down" in ans
 
 
+# ----- orchestrator fallback onto smartest models ----------------------------
+def test_orchestrator_available_env_force_none(monkeypatch):
+    monkeypatch.setenv("PAL_ORCHESTRATOR", "none")
+    assert chat_repl._orchestrator_available() is False
+
+
+def test_orchestrator_available_checks_cli(monkeypatch):
+    import shutil
+
+    monkeypatch.delenv("PAL_ORCHESTRATOR", raising=False)
+    monkeypatch.setenv("PAL_ORCHESTRATOR_CLI", "claude")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/claude" if name == "claude" else None)
+    assert chat_repl._orchestrator_available() is True
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert chat_repl._orchestrator_available() is False
+
+
+def test_smartest_models_ranks_by_intelligence_and_tools(monkeypatch):
+    from providers.router import catalog
+
+    class _E:
+        def __init__(self, model, intel, tools, aliases=()):
+            self.model = model
+            self.quality_profile = {"intelligence": intel}
+            self.cost_profile = {}
+            self.tools = tools
+            self.availability = catalog.AVAILABLE
+            self.provider = "p"
+            self.aliases = list(aliases)
+
+        @property
+        def routable(self):
+            return True
+
+        @property
+        def intelligence(self):
+            return int(self.quality_profile.get("intelligence") or 0)
+
+        @property
+        def cost_rank(self):
+            return 2
+
+    cat_entries = [
+        _E("smart-tool", 20, True),
+        _E("mid-tool", 14, True),
+        _E("smartest-notool", 30, False),   # excluded: no tools
+        _E("cheap-tool", 8, True),
+    ]
+
+    class _Cat:
+        entries = cat_entries
+
+    monkeypatch.setattr(catalog, "routing_catalog", lambda *a, **k: _Cat())
+    out = chat_repl._smartest_models(2, need_tools=True, is_available=lambda m: True)
+    assert out == ["smart-tool", "mid-tool"]   # highest-intelligence tool-capable, no no-tool model
+
+
+def test_smartest_models_falls_back_to_router(monkeypatch):
+    from providers.router import catalog, chat_router
+
+    class _Cat:
+        entries = []
+
+    monkeypatch.setattr(catalog, "routing_catalog", lambda *a, **k: _Cat())
+    monkeypatch.setattr(chat_router, "route", lambda *a, **k: {"smart": "fallback-smart"})
+    assert chat_repl._smartest_models(3, is_available=lambda m: True) == ["fallback-smart"]
+
+
 # ----- auto-debate gate for huge tasks (Phase 4) -----------------------------
 def test_is_huge_task_detects_big_and_multistep(monkeypatch):
     monkeypatch.delenv("PAL_CHAT_HUGE_STEPS", raising=False)
