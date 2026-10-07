@@ -75,7 +75,16 @@ flowchart TD
 
 ### The `sauron` engine CLI
 
-Installing sauron gives you the `sauron` CLI, which drives the bundled core engine. `sauron serve` starts the engine (the MCP server) for any client; `sauron run "<task>"` is a headless one-shot (`--ro`, `--agent`, `--model`, `--json`); **`sauron run --plan plan.md`** hands a whole job off and returns only the result. `sauron chat` adds `/tools` (run nmap/nuclei etc. on the box; **qwen3** on Groq is the default tool executor), `/agent` (full local Claude Code), and `/debate` (reads files, then a panel decides). Routing learns from outcomes (`sauron distill`). Details: [pal-router](skills/pal-router/SKILL.md).
+Installing sauron gives you the `sauron` CLI, which drives the bundled core engine. `sauron serve` starts the engine (the MCP server) for any client; `sauron run "<task>"` is a headless one-shot (`--ro`, `--agent`, `--model`, `--json`); **`sauron run --plan plan.md`** hands a whole job off and returns only the result.
+
+**`sauron chat`** is a self-contained interactive assistant — chat and the tool loop go straight through the engine's router (classifier routing, capability-matched fallback, refusal-memory, credential masking), so it needs no running MCP server. It keeps a **persistent in-session context**: every plain message runs with full tools on the box (**qwen3** on Groq is the default tool executor) and remembers prior turns, so follow-ups build on what came before instead of starting from zero. Commands:
+
+- `/ask | /cheap | /smart <q>` — plain chat (no tools) for one message
+- `/agent[:edit|:plan|:review] <task>` — full local Claude Code · `/debate` · `/delegate <model> <q>`
+- `/context` · `/history` · `/compact` (summarize older turns) · `/clear` (reset)
+- `/model` · `/models` · `/help` · `/exit`
+
+Routing learns from outcomes (`sauron distill`). Details: [pal-router](skills/pal-router/SKILL.md).
 
 Full matrix: [skills/pal-router/model-map.md](skills/pal-router/model-map.md).
 
@@ -116,7 +125,11 @@ git clone https://github.com/crowx01/sauron && cd sauron
 > from a clone if you want a persistent `sauron` binary on `PATH`).
 
 `setup.sh` (and its `npx` wrapper) walks you through orchestrator, scope, which
-skills auto-load at session start, and which routed models you have keys for, then
+skills auto-load at session start, and which routed models you have keys for. For
+each provider you pick it shows the official console URL, takes the key with
+**masked entry** (never echoed, stored `0600`, never committed), and
+**validates the key shape** so an obvious typo is caught before you finish — any
+provider can be skipped and configured later. Then it
 handles the rest automatically: writes rules/settings, backs up existing files
 with `.bak.<timestamp>`, installs shipped skills into the right agent-specific
 directory, **auto-clones and syncs the [`Pentesting-Skills`](https://github.com/crowx01/Pentesting-Skills)
