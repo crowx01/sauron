@@ -6,7 +6,7 @@
     "sauron": "bin/cli.js"
   },
   "scripts": {
-    "test": "bash bin/setup-lib.sh && echo lib-syntax-ok"
+    "test": "bash -n setup.sh && bash bin/setup-lib.sh && echo lib-syntax-ok && bash bin/test-setup-lib.sh"
   },
   "engines": {
     "node": ">=14"

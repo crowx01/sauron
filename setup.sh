@@ -666,26 +666,12 @@ collect_keys() {
   step "API keys"
   say "  Enter each key now (visible as asterisks) or press ENTER to skip."
   local GROQ_KEY="" OR_KEY="" GEMINI_KEY="" OPENAI_KEY=""
-  if [ "$M_GROQ" = 1 ]; then
-    info "Groq (groq/gpt-oss + qwen3 default tool executor) — https://console.groq.com/keys"
-    masked_read GROQ_KEY "    Groq API Key: "
-    GROQ_KEY=$(printf '%s' "$GROQ_KEY" | tr -d '[:space:]')
-  fi
-  if [ "$M_NEMO" = 1 ] || [ "$M_GROK" = 1 ] || [ "$M_ORFR" = 1 ]; then
-    info "OpenRouter (nemotron/grok/or-free) — https://openrouter.ai/settings/keys"
-    masked_read OR_KEY "    OpenRouter API Key: "
-    OR_KEY=$(printf '%s' "$OR_KEY" | tr -d '[:space:]')
-  fi
-  if [ "$M_FLSH" = 1 ] || [ "$M_PRO" = 1 ]; then
-    info "Google Gemini (flash/pro) — https://aistudio.google.com/apikey"
-    masked_read GEMINI_KEY "    Gemini API Key: "
-    GEMINI_KEY=$(printf '%s' "$GEMINI_KEY" | tr -d '[:space:]')
-  fi
-  if [ "$M_OPENAI" = 1 ]; then
-    info "OpenAI (optional, gpt-5 tiers) — https://platform.openai.com/api-keys"
-    masked_read OPENAI_KEY "    OpenAI API Key: "
-    OPENAI_KEY=$(printf '%s' "$OPENAI_KEY" | tr -d '[:space:]')
-  fi
+  # provider metadata (URL/env-var/shape) + masked entry + shape validation all
+  # live in setup-lib.sh read_key, so the installer stays free of scattered URLs.
+  [ "$M_GROQ" = 1 ] && read_key GROQ_KEY groq
+  { [ "$M_NEMO" = 1 ] || [ "$M_GROK" = 1 ] || [ "$M_ORFR" = 1 ]; } && read_key OR_KEY openrouter
+  { [ "$M_FLSH" = 1 ] || [ "$M_PRO" = 1 ]; } && read_key GEMINI_KEY gemini
+  [ "$M_OPENAI" = 1 ] && read_key OPENAI_KEY openai
   local umask_prev; umask_prev=$(umask); umask 077
   {
     [ "$M_FLSH" = 1 ] || [ "$M_PRO" = 1 ] && printf 'export GEMINI_API_KEY=%s\n' "${GEMINI_KEY:-your-gemini-key}"

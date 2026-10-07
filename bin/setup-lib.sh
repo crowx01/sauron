@@ -141,6 +141,62 @@ masked_read() {
   printf -v "$__var" '%s' "$__buf"
 }
 
+# ---------- provider key metadata (single source of truth) ----------
+# One row per provider the engine can authenticate. provider_spec <id> prints
+# four TAB-separated fields so the installer never scatters URLs/env-vars/shapes:
+#   <env_var> <console_url> <key_regex> <description>
+# key_regex is a loose shape check (warn-not-block); an empty regex means
+# "cannot validate shape". Keep this in sync with core catalog `_auth()`.
+provider_spec() {
+  case "$1" in
+    groq)       printf '%s\t%s\t%s\t%s\n' CUSTOM_API_KEY     'https://console.groq.com/keys'         '^gsk_[A-Za-z0-9]{20,}$'        'Groq (groq/gpt-oss + qwen3 default tool executor)' ;;
+    openrouter) printf '%s\t%s\t%s\t%s\n' OPENROUTER_API_KEY 'https://openrouter.ai/settings/keys'   '^sk-or-[A-Za-z0-9._-]{10,}$'   'OpenRouter (nemotron / grok / openrouter-free)' ;;
+    gemini)     printf '%s\t%s\t%s\t%s\n' GEMINI_API_KEY     'https://aistudio.google.com/apikey'    '^AIza[A-Za-z0-9_-]{30,}$'      'Google Gemini (flash / pro)' ;;
+    openai)     printf '%s\t%s\t%s\t%s\n' OPENAI_API_KEY     'https://platform.openai.com/api-keys'  '^sk-[A-Za-z0-9._-]{20,}$'      'OpenAI (optional, gpt-5 tiers)' ;;
+    xai)        printf '%s\t%s\t%s\t%s\n' XAI_API_KEY        'https://console.x.ai'                  '^xai-[A-Za-z0-9]{20,}$'        'xAI (native Grok models)' ;;
+    *) return 1 ;;
+  esac
+}
+
+# field <id> <1-based column> -> that TAB field of provider_spec, or "".
+provider_field() { provider_spec "$1" 2>/dev/null | cut -f"$2"; }
+
+# validate_key <provider_id> <key> -> 0 when the key is EMPTY (a skip) or
+# matches the provider's expected shape; 1 when it is non-empty but malformed.
+# Warn-not-block: callers surface 1 as a warning but may still keep the value,
+# because provider key formats change over time.
+validate_key() {
+  local __id="$1" __key="$2" __regex
+  [ -z "$__key" ] && return 0
+  __regex="$(provider_field "$__id" 3)"
+  [ -z "$__regex" ] && return 0            # no shape known -> cannot judge
+  printf '%s' "$__key" | grep -Eq "$__regex"
+}
+
+# read_key <VAR> <provider_id>
+# Masked prompt for a provider key, with the provider's description + official
+# console URL shown first, loose shape validation, and a single re-entry on an
+# obviously-malformed value. ENTER skips (left blank). Never echoes the key.
+read_key() {
+  local __var="$1" __id="$2" __url __desc __val __tries=0
+  __url="$(provider_field "$__id" 2)"
+  __desc="$(provider_field "$__id" 4)"
+  [ -n "$__desc" ] && info "$__desc — get a key at $__url"
+  while :; do
+    masked_read "$__var" "    ${__id} API Key (ENTER to skip): "
+    printf -v "$__var" '%s' "$(printf '%s' "${!__var}" | tr -d '[:space:]')"
+    __val="${!__var}"
+    [ -z "$__val" ] && { warn "skipped ${__id} — add it to the env file later to enable it"; return 0; }
+    validate_key "$__id" "$__val" && return 0
+    __tries=$((__tries + 1))
+    if [ "$__tries" -ge 2 ]; then
+      warn "keeping the ${__id} value as entered — validate manually if authentication fails."
+      return 0
+    fi
+    warn "that does not look like a ${__id} key (expected shape per $__url). Re-enter, or ENTER to skip."
+  done
+}
+
 # ---------- multi-select ----------
 # multiselect  RESULT_ARRAY_NAME  DEFAULTS_CSV  LABEL_1 LABEL_2 ...
 #   DEFAULTS_CSV: comma-separated 0/1 (one per label) for initial selection.
