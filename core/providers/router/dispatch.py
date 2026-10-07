@@ -19,6 +19,42 @@ import time
 log = logging.getLogger(__name__)
 
 
+def _capability_chain(model: str, prompt: str, tools: list | None, category: str) -> list[str]:
+    """Available, capability-matched fallback peers for ``model`` from the
+    catalog, best-first, excluding the primary. Used to seed the fallback chain
+    so a reroute never drops to a model that cannot do what the call needs
+    (tool-calling, or holding a prompt this large). Best-effort: returns [] if
+    the catalog is unavailable so dispatch behaviour is unchanged without it.
+    """
+    try:
+        from providers.registry import ModelProviderRegistry
+        from providers.router import catalog
+
+        need = catalog.Need(
+            tools=bool(tools),
+            # chars/4 ≈ tokens: only fall back to models that can hold the prompt
+            min_context=max(0, len(prompt or "") // 4),
+            # bulk/long-context categories may use free-tier routes; others stay off it
+            allow_free_tier=category in ("long_context_bulk",),
+        )
+        primary_names = {model.lower()}
+        try:
+            prov = ModelProviderRegistry.get_provider_for_model(model)
+            if prov is not None:
+                primary_names |= {a.lower() for a in getattr(prov, "aliases", []) or []}
+        except Exception:  # noqa: BLE001
+            pass
+        out: list[str] = []
+        for e in catalog.select(need):
+            if e.model.lower() in primary_names or e.model in out:
+                continue
+            out.append(e.model)
+        return out[:8]
+    except Exception as exc:  # noqa: BLE001 - never let routing enrichment break a call
+        log.debug("capability-chain unavailable: %s", exc)
+        return []
+
+
 def generate(
     model: str,
     prompt: str,
@@ -102,8 +138,9 @@ def generate(
         raise RuntimeError(f"no provider for {_model}")
 
     t0 = time.time()
+    extra_chain = _capability_chain(dispatch_model, prompt, tools, category)
     try:
-        resp = call_with_fallback(_invoke, dispatch_model)
+        resp = call_with_fallback(_invoke, dispatch_model, extra_chain=extra_chain)
     except Exception as exc:
         lat_ms = int((time.time() - t0) * 1000)
         tag = refusal_memory.classify(str(exc))

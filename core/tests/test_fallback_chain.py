@@ -202,3 +202,42 @@ def test_uncategorized_model_no_fallback_attempted():
     with pytest.raises(RuntimeError):
         fc.call_with_fallback(call, "some/random-model")
     assert calls == ["some/random-model"]  # no peers to try
+
+
+# ----- capability-matched extra_chain (catalog-backed fallback) ---------------
+def test_merge_chain_appends_extra_after_static_deduped():
+    # nemotron's static peers are [or-free, gemini-3.6-flash]; extra adds a new
+    # capability-matched peer plus a dup that must be collapsed.
+    merged = fc._merge_chain("nemotron", ["gemini-3.6-flash", "qwen3", "nemotron"])
+    assert merged == ["nemotron", "or-free", "gemini-3.6-flash", "qwen3"]
+
+
+def test_extra_chain_enables_fallback_for_uncategorized_model():
+    # No static category, but the dispatch layer supplied capability-matched
+    # peers -> fallback still happens instead of failing after one attempt.
+    calls: list[str] = []
+
+    def call(m: str):
+        calls.append(m)
+        if m != "good-model":
+            raise RuntimeError("429")
+        return "ok"
+
+    result = fc.call_with_fallback(
+        call, "some/random-model", extra_chain=["bad-model", "good-model"]
+    )
+    assert result == "ok"
+    assert calls == ["some/random-model", "bad-model", "good-model"]
+
+
+def test_extra_chain_respects_max_attempts(monkeypatch):
+    monkeypatch.setenv("PAL_FALLBACK_MAX", "2")
+    calls: list[str] = []
+
+    def call(m: str):
+        calls.append(m)
+        raise RuntimeError("503")
+
+    with pytest.raises(RuntimeError):
+        fc.call_with_fallback(call, "some/random-model", extra_chain=["a", "b", "c"])
+    assert calls == ["some/random-model", "a"]  # capped at 2 total

@@ -134,15 +134,37 @@ def _extract_status_and_text(exc: Exception) -> tuple[int | None, str]:
     return status, text
 
 
+def _merge_chain(model: str, extra_chain: Iterable[str] | None) -> list[str]:
+    """Primary first, then static same-category peers, then any caller-supplied
+    (e.g. capability-matched catalog) peers — de-duplicated, order preserved."""
+    ordered: list[str] = [model, *chain_for(model)]
+    if extra_chain:
+        ordered.extend(extra_chain)
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in ordered:
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out[: _max_attempts()]
+
+
 def call_with_fallback(
     call: Callable[[str], object],
     model: str,
     *,
     on_switch: Callable[[str, str, str], None] | None = None,
+    extra_chain: Iterable[str] | None = None,
 ) -> object:
     """Invoke ``call(model)`` and, on a fallback-worthy failure, retry against
-    each same-category peer in order. Raises the LAST exception when the whole
-    chain is exhausted.
+    each peer in order. Raises the LAST exception when the whole chain is
+    exhausted.
+
+    The chain is the primary model, then its static same-category peers from
+    ``~/.pal/env.json``, then ``extra_chain`` — a caller-supplied list of
+    already capability-matched, available peers (the dispatch layer fills this
+    from the catalog so fallback never silently drops to a model that cannot do
+    tools or hold the prompt, and so fallback works even with no static config).
 
     ``on_switch(prev_model, next_model, reason)`` fires before every switch —
     use it to log the trail to the operator.
@@ -151,7 +173,7 @@ def call_with_fallback(
         return call(model)
 
     attempted: list[str] = [model]
-    chain = [model, *chain_for(model)][: _max_attempts()]
+    chain = _merge_chain(model, extra_chain)
     last_exc: Exception | None = None
 
     for i, candidate in enumerate(chain):
