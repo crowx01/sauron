@@ -970,6 +970,75 @@ def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
     return Panel(Group(*rows), border_style="cyan", padding=(0, 1))
 
 
+# Eye-of-Sauron logo, top→bottom flame gradient from the brand palette (sauron.svg).
+_LOGO = [
+    "   ▄█████▄   ",
+    " ▄██▀ █ ▀██▄ ",
+    "███   █   ███",
+    " ▀██▄ █ ▄██▀ ",
+    "   ▀█████▀   ",
+]
+_LOGO_STYLES = ["bold #ffd061", "bold #ffab24", "bold #ff8a1c", "bold #ff6a12", "bold #c62a04"]
+_BRAND = "#ff8a1c"
+
+
+def _version() -> str:
+    """Best-effort sauron version from the nearest package.json (empty if none)."""
+    import json
+    import pathlib
+
+    for parent in pathlib.Path(__file__).resolve().parents:
+        pj = parent / "package.json"
+        if pj.exists():
+            try:
+                return json.loads(pj.read_text(encoding="utf-8")).get("version", "")
+            except (OSError, ValueError):
+                return ""
+    return ""
+
+
+def _banner(cheap: str | None, smart: str | None, **ctx):
+    """Compact, borderless startup banner: the Sauron eye logo on the left with
+    the engine identity stacked to its right, then a one-line feature summary
+    and a command hint — styled after a modern CLI splash."""
+    from rich.table import Table
+
+    model = ctx.get("model") or "auto (routed)"
+    cwd = ctx.get("cwd", "")
+    home = os.path.expanduser("~")
+    cwd_disp = (cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd) if cwd else ""
+    plan_only = ctx.get("plan_only", _claude_plan_only())
+    orch_present = ctx.get("orch_present")
+    exec_mode = "engine-only" if plan_only else "claude+engine"
+    ver = _version()
+
+    logo = Text()
+    for i, row in enumerate(_LOGO):
+        logo.append(row + ("\n" if i < len(_LOGO) - 1 else ""), style=_LOGO_STYLES[i])
+
+    ident = Group(
+        Text.assemble(("sauron", f"bold {_BRAND}"), (f"  v{ver}" if ver else "", "dim"),
+                      ("   one agent to route them all", "dim")),
+        Text.assemble((str(model), "green"), ("  ·  ", "dim"),
+                      (exec_mode, "magenta"), ("  ·  ", "dim"),
+                      ("self-contained", "cyan")),
+        Text(cwd_disp, style="dim"),
+    )
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column()
+    grid.add_column(vertical="middle")
+    grid.add_row(logo, ident)
+
+    orch_line = (f"claude plans · engine executes ({_orchestrator_cli()} present)" if orch_present
+                 else f"no {_orchestrator_cli()} orchestrator · self-orchestrating on engine")
+    status = Text.assemble(
+        ("Self-contained engine. ", "bold"),
+        (f"{orch_line}  ·  persistent sessions  ·  auto-debate on huge tasks.", "bold"),
+    )
+    hint = Text("/help for commands  ·  /status for posture  ·  /resume to continue  ·  /exit", style="dim")
+    return Group(grid, Text(""), status, hint)
+
+
 def _available_models() -> list[str]:
     """Available model ids for the /model picker (pool first, then a curated set)."""
     from providers.registry import ModelProviderRegistry
@@ -1254,14 +1323,16 @@ async def _run(handle):
     def _persist() -> None:
         session_store.save(session_id, history, cwd, selected_model or "")
 
+    def _wctx() -> dict:
+        return {
+            "session_id": session_id, "cwd": cwd, "model": selected_model,
+            "storage": os.getenv("PAL_STORAGE", "memory"),
+            "plan_only": _claude_plan_only(),
+            "orch_present": _orchestrator_available(), "orch_cli": _orchestrator_cli(),
+        }
+
     def _show_welcome() -> None:
-        console.print(_header(
-            r0["cheap"], r0["smart"],
-            session_id=session_id, cwd=cwd, model=selected_model,
-            storage=os.getenv("PAL_STORAGE", "memory"),
-            plan_only=_claude_plan_only(),
-            orch_present=_orchestrator_available(), orch_cli=_orchestrator_cli(),
-        ))
+        console.print(_banner(r0["cheap"], r0["smart"], **_wctx()))
 
     _show_welcome()
     _sm = _smartest_models(3, need_tools=True)
@@ -1292,7 +1363,7 @@ async def _run(handle):
             console.print("[dim]bye[/]")
             return 0
         if low in ("/help", "/h", "?"):
-            _show_welcome()
+            console.print(_header(r0["cheap"], r0["smart"], **_wctx()))
             continue
         if low in ("/clear", "/reset", "/new"):
             history.clear()
