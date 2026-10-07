@@ -597,6 +597,18 @@ def _note(msg: str, kind: str = "sys") -> None:
     console.print(f"[{_STYLE.get(kind, 'dim')}]{_GLYPH.get(kind, '·')} {msg}[/]")
 
 
+def _panel(body, title: str, *, glyph: str = "▸", border: str = "cyan") -> Panel:
+    """A titled panel in the shared visual language: a glyph + bold title in
+    the border color, left-aligned, same padding everywhere."""
+    return Panel(
+        body,
+        title=Text(f"{glyph} {title}", style=f"bold {border}"),
+        title_align="left",
+        border_style=border,
+        padding=(0, 1),
+    )
+
+
 def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = None) -> Panel:
     color = color or _STYLE.get(role, "green")
     glyph = _GLYPH.get(role, "◆")
@@ -646,7 +658,6 @@ def _status_panel(selected_model: str | None, cwd: str) -> Panel:
     orch_av = _orchestrator_available()
     storage = os.getenv("PAL_STORAGE", "memory")
     rows = Group(
-        Text.assemble(("engine posture", "bold cyan")),
         Text.from_markup(f"caveman    {cav}  [dim](skill attaches at session start)[/]"),
         Text.from_markup(f"headroom   {head}  [dim](compresses tool output at the provider boundary)[/]"),
         Text.from_markup(
@@ -658,7 +669,7 @@ def _status_panel(selected_model: str | None, cwd: str) -> Panel:
         ),
         Text.from_markup(f"storage    {storage}  ·  model {selected_model or 'auto (routed)'}"),
     )
-    return Panel(rows, title="status", title_align="left", border_style="cyan", padding=(0, 1))
+    return _panel(rows, "status", glyph="⚑")
 
 
 def _new_session_id() -> str:
@@ -1286,8 +1297,7 @@ async def _run(handle):
                         f"  {r['cwd'] or ''}[/]"
                         for r in rows
                     )
-                    console.print(Panel(body, title="saved sessions", title_align="left",
-                                        border_style="cyan", padding=(0, 1)))
+                    console.print(_panel(body, "saved sessions", glyph="⧉"))
                 continue
             target = arg or (session_store.latest() or {}).get("id", "")
             if not target:
@@ -1299,11 +1309,11 @@ async def _run(handle):
                 continue
             history[:] = restored
             session_id = target  # keep writing back to the resumed session
-            console.print(f"[dim]resumed session [bold]{target}[/] — {len(history)} turn(s) restored[/]")
+            _note(f"resumed session {target} — {len(history)} turn(s) restored", "ok")
             continue
         if low in ("/context", "/ctx"):
             chars = sum(len(t.get("content") or "") for t in history)
-            console.print(Panel(
+            console.print(_panel(
                 Text.assemble(
                     ("session  ", "dim"), (f"{session_id}\n", ""),
                     ("cwd      ", "dim"), (f"{cwd}\n", ""),
@@ -1311,7 +1321,7 @@ async def _run(handle):
                     ("turns    ", "dim"), (f"{len(history)}\n", ""),
                     ("context  ", "dim"), (f"~{chars} chars (~{chars // 4} tokens), budget {_CTX_BUDGET}", ""),
                 ),
-                title="context", title_align="left", border_style="cyan", padding=(0, 1),
+                "context", glyph="▦",
             ))
             continue
         if low in ("/history", "/hist"):
@@ -1319,24 +1329,23 @@ async def _run(handle):
                 console.print("[dim]no conversation yet[/]")
             else:
                 body = "\n\n".join(
-                    f"[{'bold green' if t['role'] == 'user' else 'bold cyan'}]"
-                    f"{'you' if t['role'] == 'user' else 'sauron'}[/]: {t['content']}"
+                    (f"[bold]› you[/]: {t['content']}" if t["role"] == "user"
+                     else f"[bold green]{_GLYPH['pal']} sauron[/]: {t['content']}")
                     for t in history
                 )
-                console.print(Panel(body, title=f"history · {len(history)} turns",
-                                    title_align="left", border_style="cyan", padding=(0, 1)))
+                console.print(_panel(body, f"history · {len(history)} turns", glyph="≡"))
             continue
         if low.startswith("/compact"):
             if len(history) <= 3:
-                console.print("[dim]not enough history to compact[/]")
+                _note("not enough history to compact", "sys")
                 continue
             with console.status("[dim]compacting context…[/]", spinner="dots"):
                 folded, err = await asyncio.to_thread(_ctx_compact, history)
             if err:
-                console.print(f"[red]compact failed: {err}[/] [dim](history left intact)[/]")
+                _note(f"compact failed: {err} (history left intact)", "err")
             else:
                 _persist()  # save the folded history so a restart keeps the compaction
-                console.print(f"[dim]compacted {folded} older turn(s) into a summary[/]")
+                _note(f"compacted {folded} older turn(s) into a summary", "ok")
             continue
         if low in ("/status", "/stat"):
             console.print(_status_panel(selected_model, cwd))
@@ -1351,9 +1360,9 @@ async def _run(handle):
                 except Exception as exc:
                     table = f"__ERROR__{type(exc).__name__}: {str(exc)[:200]}"
             if table.startswith("__ERROR__"):
-                console.print(f"[red]{table[len('__ERROR__'):]}[/]")
+                _note(table[len("__ERROR__"):], "err")
             else:
-                console.print(Panel(Text(table), title="models", border_style="cyan", padding=(0, 1)))
+                console.print(_panel(Text(table), "models", glyph="▤"))
             continue
 
         # /delegate <model> <question>
@@ -1404,20 +1413,12 @@ async def _run(handle):
                 # invoked for execution.
                 pool = _smartest_models(3, need_tools=True)
                 if not pool:
-                    console.print("[red]no capable engine model available — check `pal diag`[/]")
+                    _note("no capable engine model available — check `pal diag`", "err")
                     continue
                 full_edit = role == "edit"
                 if full_edit and not agent_warned:
-                    console.print(
-                        Panel(
-                            Text.assemble(
-                                ("⚠ /agent:edit executes on ENGINE models with full tools", "bold yellow"),
-                                (f" — they can run commands and EDIT files under\n{cwd}\n", "yellow"),
-                                ("plain /agent is read-only. Only use on authorized systems.", "dim"),
-                            ),
-                            border_style="yellow", padding=(0, 1),
-                        )
-                    )
+                    _note(f"/agent:edit executes on ENGINE models with full tools — can run commands and EDIT files "
+                          f"under {cwd}. Authorized systems only (plain /agent is read-only).", "warn")
                     agent_warned = True
                 task_hint = {
                     "planner": "Produce a concrete step-by-step plan (do not execute). ",
@@ -1724,18 +1725,19 @@ async def _run(handle):
         last_answer = ans
         # Huge/high-stakes task -> gate the answer through the debate panel.
         if _auto_debate_enabled() and not ans.startswith("__ERROR__") and _is_huge_task(line, len(transcript)):
-            console.print("[dim]huge task → validating via debate panel "
-                          "(executor→reviewer→judge; PAL_CHAT_AUTODEBATE=0 to skip)…[/]")
+            _note("huge task → validating via debate panel (executor→reviewer→judge; PAL_CHAT_AUTODEBATE=0 to skip)",
+                  "debate")
             try:
                 with console.status("[dim]debate panel deliberating…[/]", spinner="dots"):
                     verdict = await _debate_gate(line, ans)
             except KeyboardInterrupt:
-                console.print("[dim]debate gate skipped[/]")
+                _note("debate gate skipped", "sys")
                 verdict = None
             if verdict:
                 _ok = verdict.startswith("verdict: COMPLETE")
-                console.print(Panel(Text(verdict), title="debate validation", title_align="left",
-                                    border_style=("green" if _ok else "yellow"), padding=(0, 1)))
+                console.print(_panel(Text(verdict), "debate validation",
+                                     glyph=(_GLYPH["ok"] if _ok else _GLYPH["warn"]),
+                                     border=("green" if _ok else "yellow")))
 
 
 def _quiet_logging() -> None:
