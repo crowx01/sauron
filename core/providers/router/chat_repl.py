@@ -36,7 +36,9 @@ from rich.text import Text
 
 try:
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.enums import EditingMode
+    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -47,6 +49,72 @@ except ImportError:  # pragma: no cover - degrade to plain input if not installe
     _PT_OK = False
 
 console = Console()
+
+# ---- Claude-Code-style interaction layer -----------------------------------
+# Permission modes cycled with Shift+Tab (shown in the bottom toolbar):
+#   auto       every message runs with full tools (no prompt)
+#   ask        confirm once before a message runs with full tools
+#   read-only  messages run with the read-only tool allowlist only (no mutation)
+_PERM_MODES = ("auto", "ask", "read-only")
+_PERM_LABEL = {"auto": "full-auto", "ask": "ask first", "read-only": "read-only"}
+_THINK_VERBS = ("Thinking", "Routing", "Herding", "Puzzling", "Scheming",
+                "Conjuring", "Divining", "Pondering", "Computing", "Sleuthing")
+
+
+def _think() -> str:
+    import random
+
+    return random.choice(_THINK_VERBS)
+
+
+class _ReplState:
+    """Shared mutable UI state the prompt session, bottom toolbar and the main
+    loop all read (perm mode, current model, cwd)."""
+
+    def __init__(self, model: str | None, cwd: str):
+        perm = (os.getenv("PAL_CHAT_PERM", "auto") or "auto").strip().lower()
+        self.perm = perm if perm in _PERM_MODES else "auto"
+        self.model = model
+        self.cwd = cwd
+
+    def cycle_perm(self) -> None:
+        self.perm = _PERM_MODES[(_PERM_MODES.index(self.perm) + 1) % len(_PERM_MODES)]
+
+
+_SLASH_CMDS = (
+    "/help", "/status", "/context", "/history", "/compact", "/clear", "/resume",
+    "/model", "/models", "/ask", "/cheap", "/smart", "/agent", "/agent:edit",
+    "/agent:plan", "/agent:review", "/delegate", "/debate", "/tools", "/tools:ro",
+    "/plan", "/mission", "/exit",
+)
+
+if _PT_OK:
+
+    class _SlashCompleter(Completer):
+        """Autocomplete slash-commands when the line begins with '/'."""
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/") or " " in text:
+                return
+            for cmd in _SLASH_CMDS:
+                if cmd.startswith(text):
+                    yield Completion(cmd, start_position=-len(text), display=cmd)
+
+
+def _render_tools(transcript) -> None:
+    """Claude-Code-style tool trace: ⏺ Tool(args) then an indented ⎿ result."""
+    for name, args, res in transcript:
+        shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args, default=str)
+        console.print(Text.assemble(("⏺ ", "bold cyan"),
+                                     (name, "bold"), ("(", "dim"), (str(shown)[:100], "cyan"), (")", "dim")))
+        first = (str(res).strip().splitlines() or [""])[0]
+        extra = max(0, len(str(res).strip().splitlines()) - 1)
+        tail = f"  (+{extra} more line{'s' if extra != 1 else ''})" if extra else ""
+        glyph = "✗" if str(res).lower().startswith("error") else "⎿"
+        gstyle = "red" if glyph == "✗" else "dim"
+        console.print(Text.assemble((f"  {glyph} ", gstyle), (first[:160], "dim"), (tail, "dim")))
+
 
 # one specific role (system instruction) per command, so each behaves for its job
 _ROLES = {
@@ -787,6 +855,42 @@ async def _ask_chat(model: str, prompt: str, history: list[dict], role: str | No
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
+def _stream_on(session) -> bool:
+    """Live streaming only on a real interactive session (never for piped /
+    non-TTY callers) and unless disabled with PAL_CHAT_STREAM=0."""
+    return session is not None and os.getenv("PAL_CHAT_STREAM", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+async def _stream_chat(model: str, prompt: str, history: list[dict], role: str | None = None) -> str:
+    """Self-contained plain-chat call rendered LIVE: deltas print to the
+    terminal as the model emits them (Claude-Code-style), then the full cleaned
+    answer is returned. Outbound masking still applies in the provider. Falls
+    back to a one-shot print inside dispatch when the provider can't stream."""
+    from providers.router import dispatch
+
+    system = _ROLES.get(role or "chat", _ROLES["chat"])
+    preamble = _ctx_render(history)
+    full_prompt = f"{preamble}{prompt}" if preamble else prompt
+
+    console.print(Text.assemble((f"{_GLYPH['pal']} ", "bold green"), (model, "bold green"), ("  streaming…", "dim")))
+    buf: list[str] = []
+
+    def _on_delta(piece: str) -> None:
+        buf.append(piece)
+        console.print(piece, end="", highlight=False, soft_wrap=True)
+
+    try:
+        text = await asyncio.to_thread(
+            dispatch.generate_stream, model, full_prompt, system,
+            temperature=0.3, category="chat", tool="chat", on_delta=_on_delta,
+        )
+        console.print()  # close the streamed line
+        return _clean(text or "".join(buf))
+    except Exception as exc:  # noqa: BLE001
+        console.print()
+        return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
+
+
 # ---- auto-debate gate for huge / high-stakes tasks -------------------------
 # A "huge" task (long, multi-step, security, or one the tool loop spent many
 # steps on) is validated through the executor->reviewer->judge debate pipeline
@@ -848,16 +952,15 @@ async def _debate_gate(task: str, answer: str) -> str | None:
         return f"(debate gate unavailable: {type(exc).__name__})"
 
 
-def _build_prompt_session(session_id: str) -> PromptSession:
+def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> PromptSession:
     """Claude-Code-like input: multiline buffer, Up/Down do visual-line nav
     within the draft and only fall through to history at the first/last
     line (prompt_toolkit's Buffer.auto_up/auto_down -- built in, not
     reimplemented here), Ctrl-P/Ctrl-N are unconditional history-prev/next
     the way readline's emacs mode does it, and the in-progress draft is
-    preserved exactly: prompt_toolkit's Buffer keeps the not-yet-submitted
-    line as a trailing "working line" in its history index, so paging back
-    out past the oldest recalled entry (or forward past the newest) restores
-    it byte-for-byte rather than clearing it.
+    preserved exactly. Adds a Claude-Code-style bottom toolbar (permission
+    mode · model · cwd), Shift+Tab to cycle the permission mode, slash-command
+    autocomplete, and a placeholder hint.
     """
     kb = KeyBindings()
 
@@ -881,12 +984,36 @@ def _build_prompt_session(session_id: str) -> PromptSession:
     def _hist_next(event):
         event.current_buffer.history_forward()
 
+    if state is not None:
+        @kb.add("s-tab")       # Shift+Tab cycles the permission mode
+        @kb.add("escape", "[", "Z")  # raw backtab for terminals that send it literally
+        def _cycle_perm(event):
+            state.cycle_perm()
+            event.app.invalidate()
+
+    def _toolbar():
+        if state is None:
+            return None
+        home = os.path.expanduser("~")
+        cwd = state.cwd.replace(home, "~", 1) if state.cwd.startswith(home) else state.cwd
+        arrows = "⏵⏵" if state.perm == "auto" else "⏵"
+        return HTML(
+            f" <b>{arrows} {_PERM_LABEL[state.perm]}</b> "
+            f"<style fg='#888888'>(shift+tab to cycle)</style>  "
+            f"<style fg='#888888'>·</style>  {state.model or 'auto'}  "
+            f"<style fg='#888888'>·</style>  <style fg='#888888'>{cwd}</style>"
+        )
+
     return PromptSession(
         history=chat_history.JsonlSessionHistory(session_id),
         multiline=True,
         key_bindings=kb,
         editing_mode=EditingMode.EMACS,
         enable_history_search=False,  # keep plain Up/Down/Ctrl-P/Ctrl-N semantics
+        completer=_SlashCompleter() if _PT_OK else None,
+        complete_while_typing=True,
+        bottom_toolbar=_toolbar,
+        placeholder=HTML("<style fg='#666666'>Type a message, / for commands, Shift+Tab for mode…</style>"),
     )
 
 
@@ -968,6 +1095,75 @@ def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
         Text("  keys: Enter send · Alt+Enter newline · ↑/↓ history · Ctrl-P/Ctrl-N history", style="dim"),
     ]
     return Panel(Group(*rows), border_style="cyan", padding=(0, 1))
+
+
+# Eye-of-Sauron logo, top→bottom flame gradient from the brand palette (sauron.svg).
+_LOGO = [
+    "   ▄█████▄   ",
+    " ▄██▀ █ ▀██▄ ",
+    "███   █   ███",
+    " ▀██▄ █ ▄██▀ ",
+    "   ▀█████▀   ",
+]
+_LOGO_STYLES = ["bold #ffd061", "bold #ffab24", "bold #ff8a1c", "bold #ff6a12", "bold #c62a04"]
+_BRAND = "#ff8a1c"
+
+
+def _version() -> str:
+    """Best-effort sauron version from the nearest package.json (empty if none)."""
+    import json
+    import pathlib
+
+    for parent in pathlib.Path(__file__).resolve().parents:
+        pj = parent / "package.json"
+        if pj.exists():
+            try:
+                return json.loads(pj.read_text(encoding="utf-8")).get("version", "")
+            except (OSError, ValueError):
+                return ""
+    return ""
+
+
+def _banner(cheap: str | None, smart: str | None, **ctx):
+    """Compact, borderless startup banner: the Sauron eye logo on the left with
+    the engine identity stacked to its right, then a one-line feature summary
+    and a command hint — styled after a modern CLI splash."""
+    from rich.table import Table
+
+    model = ctx.get("model") or "auto (routed)"
+    cwd = ctx.get("cwd", "")
+    home = os.path.expanduser("~")
+    cwd_disp = (cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd) if cwd else ""
+    plan_only = ctx.get("plan_only", _claude_plan_only())
+    orch_present = ctx.get("orch_present")
+    exec_mode = "engine-only" if plan_only else "claude+engine"
+    ver = _version()
+
+    logo = Text()
+    for i, row in enumerate(_LOGO):
+        logo.append(row + ("\n" if i < len(_LOGO) - 1 else ""), style=_LOGO_STYLES[i])
+
+    ident = Group(
+        Text.assemble(("sauron", f"bold {_BRAND}"), (f"  v{ver}" if ver else "", "dim"),
+                      ("   one agent to route them all", "dim")),
+        Text.assemble((str(model), "green"), ("  ·  ", "dim"),
+                      (exec_mode, "magenta"), ("  ·  ", "dim"),
+                      ("self-contained", "cyan")),
+        Text(cwd_disp, style="dim"),
+    )
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column()
+    grid.add_column(vertical="middle")
+    grid.add_row(logo, ident)
+
+    orch_line = (f"claude plans · engine executes ({_orchestrator_cli()} present)" if orch_present
+                 else f"no {_orchestrator_cli()} orchestrator · self-orchestrating on engine")
+    status = Text.assemble(
+        ("Self-contained engine. ", "bold"),
+        (f"{orch_line}  ·  persistent sessions  ·  auto-debate on huge tasks.", "bold"),
+    )
+    hint = Text("/help for commands  ·  /status for posture  ·  /resume to continue  ·  /exit", style="dim")
+    return Group(grid, Text(""), status, hint)
 
 
 def _available_models() -> list[str]:
@@ -1250,18 +1446,21 @@ async def _run(handle):
     # One durable id per launch so the self-contained context (history) persists
     # to ~/.pal/sessions.db and /resume can bring it back after a restart.
     session_id = _new_session_id()
+    state = _ReplState(selected_model, cwd)
 
     def _persist() -> None:
         session_store.save(session_id, history, cwd, selected_model or "")
 
+    def _wctx() -> dict:
+        return {
+            "session_id": session_id, "cwd": cwd, "model": selected_model,
+            "storage": os.getenv("PAL_STORAGE", "memory"),
+            "plan_only": _claude_plan_only(),
+            "orch_present": _orchestrator_available(), "orch_cli": _orchestrator_cli(),
+        }
+
     def _show_welcome() -> None:
-        console.print(_header(
-            r0["cheap"], r0["smart"],
-            session_id=session_id, cwd=cwd, model=selected_model,
-            storage=os.getenv("PAL_STORAGE", "memory"),
-            plan_only=_claude_plan_only(),
-            orch_present=_orchestrator_available(), orch_cli=_orchestrator_cli(),
-        ))
+        console.print(_banner(r0["cheap"], r0["smart"], **_wctx()))
 
     _show_welcome()
     _sm = _smartest_models(3, need_tools=True)
@@ -1274,7 +1473,7 @@ async def _run(handle):
     session = None
     if _PT_OK and sys.stdin.isatty():
         try:
-            session = _build_prompt_session(session_id)
+            session = _build_prompt_session(session_id, state)
         except Exception:
             session = None  # e.g. no real TTY -- fall back to plain input
 
@@ -1292,7 +1491,7 @@ async def _run(handle):
             console.print("[dim]bye[/]")
             return 0
         if low in ("/help", "/h", "?"):
-            _show_welcome()
+            console.print(_header(r0["cheap"], r0["smart"], **_wctx()))
             continue
         if low in ("/clear", "/reset", "/new"):
             history.clear()
@@ -1369,6 +1568,7 @@ async def _run(handle):
             continue
         if low in ("/model", "/pick"):
             selected_model = await _pick_model_menu(session, cwd, selected_model)
+            state.model = selected_model
             continue
         if low == "/models":
             with console.status("[dim]building model catalog…[/]", spinner="dots"):
@@ -1389,9 +1589,14 @@ async def _run(handle):
                 console.print("[dim]usage: /delegate <model> <question>[/]")
                 continue
             model, q = rest[0], rest[1]
-            with console.status(f"[dim]{model} (delegated) thinking…[/]", spinner="dots"):
-                ans = await _ask_chat(model, q, history, role="delegate")
-            console.print(_bubble(model, ans, color="blue"))
+            if _stream_on(session):
+                ans = await _stream_chat(model, q, history, role="delegate")
+                if ans.startswith("__ERROR__"):
+                    console.print(_bubble(model, ans, color="blue"))
+            else:
+                with console.status(f"[dim]{_think()}… ({model})[/]", spinner="dots"):
+                    ans = await _ask_chat(model, q, history, role="delegate")
+                console.print(_bubble(model, ans, color="blue"))
             _ctx_append(history, "user", q)
             _ctx_append(history, "assistant", ans)
             _persist()
@@ -1453,9 +1658,7 @@ async def _run(handle):
                         full=full_edit, history_preamble=_ctx_render(history),
                         system_preamble=_ORCHESTRATOR_SYS,
                     )
-                for name, args, _res in transcript:
-                    shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
-                    console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+                _render_tools(transcript)
                 console.print(_bubble(f"{used} · self-orchestrator", ans, role="agent", color="magenta"))
                 _ctx_append(history, "user", line)
                 _ctx_append(history, "assistant", ans)
@@ -1533,9 +1736,7 @@ async def _run(handle):
                     digest, transcript, reader = await _tools_loop_pool(
                         gather, reader_pool, cwd, max_steps=6, full=False
                     )
-                for name, args, _res in transcript:
-                    shown = args.get("command") or args.get("path") or ""
-                    console.print(f"[dim]  read · {name}: {str(shown)[:60]}[/]")
+                _render_tools(transcript)
             else:
                 console.print("[dim](no tool-capable reader available; debating without file context)[/]")
             # Headroom: the digest gets re-sent verbatim to every panel member below;
@@ -1696,12 +1897,15 @@ async def _run(handle):
                 console.print("[red]no model available — `pal diag`[/]")
                 continue
             _note(f"{model} (chat)", "route")
-            with console.status(f"[dim]{model} thinking…[/]", spinner="dots"):
-                ans = await _ask_chat(
-                    model, line, history,
-                    role=(forced if forced in ("cheap", "smart") else None),
-                )
-            console.print(_bubble(model, ans))
+            _role = forced if forced in ("cheap", "smart") else None
+            if _stream_on(session):
+                ans = await _stream_chat(model, line, history, role=_role)
+                if ans.startswith("__ERROR__"):
+                    console.print(_bubble(model, ans))
+            else:
+                with console.status(f"[dim]{_think()}… ({model})[/]", spinner="dots"):
+                    ans = await _ask_chat(model, line, history, role=_role)
+                console.print(_bubble(model, ans))
             _ctx_append(history, "user", line)
             _ctx_append(history, "assistant", ans)
             _persist()
@@ -1722,19 +1926,28 @@ async def _run(handle):
         if not pool or not pool[0]:
             console.print("[red]no model available — check `pal diag`[/]")
             continue
-        if not tools_full_warned:
+        # Permission mode (Shift+Tab cycles it): auto runs full; read-only uses
+        # the non-mutating allowlist; ask confirms once before full tools.
+        full = state.perm != "read-only"
+        if state.perm == "ask":
+            try:
+                ok = await asyncio.to_thread(console.input, "[yellow]⏵ run with full tools on this box? [y/N][/] ")
+            except (EOFError, KeyboardInterrupt):
+                ok = ""
+            if ok.strip().lower() not in ("y", "yes"):
+                full = False
+                _note("running read-only (not approved for full tools)", "sys")
+        if full and not tools_full_warned:
             _note(f"every message runs with FULL tools here (any shell command) — /ask for plain chat. cwd: {cwd}",
                   "warn")
             tools_full_warned = True
-        _note(f"{pool[0]} · tools (full)", "route")
+        _note(f"{pool[0]} · tools ({'full' if full else 'read-only'})", "route")
         preamble = _ctx_render(history)
-        with console.status(f"[dim]{pool[0]} using tools…[/]", spinner="dots"):
+        with console.status(f"[dim]{_think()}… ({pool[0]})[/]", spinner="dots"):
             ans, transcript, used = await _tools_loop_pool(
-                line, pool, cwd, max_steps=8, full=True, history_preamble=preamble
+                line, pool, cwd, max_steps=8 if full else 5, full=full, history_preamble=preamble
             )
-        for name, args, _res in transcript:
-            shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
-            console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+        _render_tools(transcript)
         console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
         _ctx_append(history, "user", line)
         _ctx_append(history, "assistant", ans)

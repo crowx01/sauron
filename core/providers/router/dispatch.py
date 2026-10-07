@@ -177,3 +177,74 @@ def generate(
         reason=tag,
     )
     return resp
+
+
+def generate_stream(
+    model: str,
+    prompt: str,
+    system: str | None = None,
+    *,
+    temperature: float = 0.3,
+    category: str = "",
+    tool: str = "repl",
+    on_delta,
+) -> str:
+    """Stream a completion, calling ``on_delta(piece)`` for each text chunk, and
+    return the full text. Same size-guard pre-flight, caveman prefix, refusal
+    and episode recording as ``generate``. If the provider has no streaming
+    method, or the stream dies before emitting anything, it falls back to the
+    unary ``generate`` (full fallback-chain robustness) and emits the whole
+    answer in one ``on_delta``. A mid-stream failure after partial output is
+    re-raised so the caller can surface it."""
+    from providers.registry import ModelProviderRegistry
+    from providers.router import caveman, episode_store, refusal_memory
+    from providers.router.size_guard import check_or_reroute
+
+    if caveman.is_enabled() and category not in ("tools", "mission", "debate"):
+        cv = caveman.system_prefix()
+        if cv:
+            system = (cv + "\n\n" + system) if system else cv
+
+    dispatch_model = model
+    ok, hint = check_or_reroute(dispatch_model, prompt)
+    if not ok and hint and hint.startswith("route:") and hint != "route:none":
+        dispatch_model = hint.split(":", 1)[1]
+
+    prov = ModelProviderRegistry.get_provider_for_model(dispatch_model)
+    t0 = time.time()
+
+    def _unary() -> str:
+        resp = generate(model, prompt, system, temperature=temperature, category=category, tool=tool)
+        txt = getattr(resp, "content", "") or ""
+        on_delta(txt)
+        return txt
+
+    if prov is None or not hasattr(prov, "generate_content_stream"):
+        return _unary()
+
+    buf: list[str] = []
+    try:
+        for piece in prov.generate_content_stream(
+            prompt, dispatch_model, system, temperature=temperature
+        ):
+            buf.append(piece)
+            on_delta(piece)
+    except Exception as exc:  # noqa: BLE001
+        if buf:
+            lat_ms = int((time.time() - t0) * 1000)
+            episode_store.record(model, category, "error", latency_ms=lat_ms, prompt=prompt,
+                                 err_class=type(exc).__name__, tool=tool, reason=str(exc)[:200])
+            raise
+        return _unary()  # nothing streamed yet -> robust unary path
+
+    text = "".join(buf)
+    lat_ms = int((time.time() - t0) * 1000)
+    tag = refusal_memory.classify(text)
+    is_refusal = bool(tag and tag.startswith("refusal:"))
+    if is_refusal:
+        refusal_memory.record(model, category, tag)
+    else:
+        refusal_memory.record_success(model, category)
+    episode_store.record(model, category, "refusal" if is_refusal else "success",
+                         latency_ms=lat_ms, prompt=prompt, tool=tool, reason=tag)
+    return text
