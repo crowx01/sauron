@@ -68,33 +68,39 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="include unauthenticated services and uncurated discovered models")
     args = p.parse_args(argv)
 
-    # the registry/provider modules log at import; keep the table clean
+    # the registry/provider modules log at import; keep the table clean. Save and
+    # restore the global disable level so importing/calling this as a library
+    # (e.g. from tests or the REPL) cannot permanently silence WARNING logging
+    # for the rest of the process.
+    prev_disable = logging.root.manager.disable
     logging.disable(logging.WARNING)
     os.environ.setdefault("LOG_LEVEL", "ERROR")
+    try:
+        cat = catalog.build(refresh=args.refresh, discover=True, include_unavailable=args.all)
+        entries = cat.entries
+        if args.provider:
+            want = args.provider.lower()
+            known = sorted({e.provider for e in entries} | {e.adapter for e in entries})
+            entries = [e for e in entries if want in (e.provider, e.adapter)]
+            if not entries:
+                print(f"no models for provider '{args.provider}'. known: {', '.join(known) or '(none configured)'}", file=sys.stderr)
+                return 2
 
-    cat = catalog.build(refresh=args.refresh, discover=True, include_unavailable=args.all)
-    entries = cat.entries
-    if args.provider:
-        want = args.provider.lower()
-        known = sorted({e.provider for e in entries} | {e.adapter for e in entries})
-        entries = [e for e in entries if want in (e.provider, e.adapter)]
-        if not entries:
-            print(f"no models for provider '{args.provider}'. known: {', '.join(known) or '(none configured)'}", file=sys.stderr)
-            return 2
+        total = len(entries)
+        if not args.all:
+            # default view: curated models only; vendor-listed extras are routing-inert
+            entries = [e for e in entries if e.source != "discovered"]
+        hidden = total - len(entries)
 
-    total = len(entries)
-    if not args.all:
-        # default view: curated models only; vendor-listed extras are routing-inert
-        entries = [e for e in entries if e.source != "discovered"]
-    hidden = total - len(entries)
-
-    if args.json:
-        out = cat.to_dict()
-        out["models"] = [e.to_dict() for e in entries]
-        print(json.dumps(out, indent=2, sort_keys=True, default=str))
-    else:
-        print(render(cat, entries, hidden))
-    return 0
+        if args.json:
+            out = cat.to_dict()
+            out["models"] = [e.to_dict() for e in entries]
+            print(json.dumps(out, indent=2, sort_keys=True, default=str))
+        else:
+            print(render(cat, entries, hidden))
+        return 0
+    finally:
+        logging.disable(prev_disable)
 
 
 if __name__ == "__main__":

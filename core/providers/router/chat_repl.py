@@ -559,10 +559,16 @@ def _models_table() -> str:
 
     from providers.router import catalog, catalog_cli
 
+    # Save/restore the global disable level so building the table never leaves
+    # WARNING logging permanently silenced for the rest of the process.
+    _prev = _logging.root.manager.disable
     _logging.disable(_logging.WARNING)
-    cat = catalog.build(refresh=False, discover=True, include_unavailable=False)
-    entries = [e for e in cat.entries if e.source != "discovered"]
-    return catalog_cli.render(cat, entries, len(cat.entries) - len(entries))
+    try:
+        cat = catalog.build(refresh=False, discover=True, include_unavailable=False)
+        entries = [e for e in cat.entries if e.source != "discovered"]
+        return catalog_cli.render(cat, entries, len(cat.entries) - len(entries))
+    finally:
+        _logging.disable(_prev)
 
 
 def _header(cheap: str | None, smart: str | None) -> Panel:
