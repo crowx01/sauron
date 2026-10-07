@@ -13,3 +13,5 @@ importlib-resources>=5.0.0; python_version<"3.9"
 rich>=13.0
 prompt_toolkit>=3.0.43  # pal chat: history nav (Up/Down, Ctrl-P/Ctrl-N), multiline draft preservation
 headroom-ai>=0.39
+requests>=2.25  # secsuite: HTTP repeater / race-condition testing
+PyJWT>=2.0  # secsuite: JWT decode / forge / none-attack

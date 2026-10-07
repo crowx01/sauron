@@ -143,9 +143,17 @@ class SecSuiteTool(SimpleTool):
         from mcp.types import TextContent
 
         req = self.get_request_model()(**arguments)
-        result: dict[str, Any] = {"action": req.action}
+        result = run_action(req)
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-        try:
+
+def run_action(req: SecSuiteRequest) -> dict[str, Any]:
+    """Synchronous core for every secsuite action. Shared by the async MCP
+    ``execute`` wrapper and the local toolbelt adapter so the self-contained
+    tool loop can call secsuite directly (a tool, never a shell binary)."""
+    result: dict[str, Any] = {"action": req.action}
+
+    try:
             if req.action == "http_send":
                 if not req.url:
                     raise ValueError("URL is required for http_send")
@@ -239,7 +247,7 @@ class SecSuiteTool(SimpleTool):
             else:
                 raise ValueError(f"Unknown action: {req.action}")
 
-        except Exception as e:
-            result["error"] = str(e)
+    except Exception as e:
+        result["error"] = str(e)
 
-        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+    return result

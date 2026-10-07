@@ -294,14 +294,16 @@ _TOOL_TAGS = re.compile(r"<tool_call>.*?</tool_call>|<tool_result[^>]*>.*?</tool
 
 
 def _ensure_toolbelt():
-    """Enable PAL's local tools (bash allowlist, read_file, web_fetch, gh) so
-    ANY model -- even a cheap one -- can act on this Kali box through PAL.
+    """Enable PAL's local tools (bash allowlist, read_file, web_fetch, gh,
+    secsuite) so ANY model -- even a cheap one -- can act on this Kali box
+    through PAL. secsuite is PAL's Burp-alternative suite, exposed as a tool so
+    models call it directly instead of shelling out to a non-existent binary.
     """
     os.environ.setdefault("PAL_TOOLBELT", "1")
     from providers.tooling import toolbelt as tb_mod
 
     tb = tb_mod.get_toolbelt()  # importing registers the adapters
-    for name in ("bash", "read_file", "write_file", "web_fetch", "gh"):
+    for name in ("bash", "read_file", "write_file", "web_fetch", "gh", "secsuite"):
         try:
             tb.enable(name)
         except Exception:
@@ -361,8 +363,12 @@ _TOOLS_SYS_FULL = (
     "ONLY on those. Never `git add .` / `git add -A` / `git commit -a` when an explicit file "
     "list was given; stage just the named paths. The executor enforces this independently.\n"
     "- Long-running scans: pass a generous timeout_s (e.g. 120) in the bash args.\n"
-    "- IMPORTANT: NEVER launch local Burp Suite desktop binaries (e.g. `burpsuite`) or attempt to run `secsuite` as a bash command (secsuite is not a CLI binary). "
-    "For HTTP requests, JWT decoding/forging, and traffic inspection, use standard Kali CLI tools (`curl`, `python3`, `jq`, etc.) via bash.\n"
+    "- IMPORTANT: NEVER launch local Burp Suite desktop binaries (e.g. `burpsuite`). For HTTP "
+    "repeater, JWT decode/forge/none-attack, response diffing, traffic search, and race-condition "
+    "(parallel) testing, call the `secsuite` TOOL directly — "
+    '<tool_call>{"name":"secsuite","arguments":{"action":"http_send","url":"..."}}</tool_call> — '
+    "do NOT run `secsuite` in bash (it is a tool, not a CLI binary). curl/python3 via bash remain "
+    "fine for one-off requests.\n"
     "- write_file creates files; read_file reads them.\n"
     "Emit exactly one tool call as "
     '<tool_call>{"name":"<tool>","arguments":{...}}</tool_call> with the "name" included. '
@@ -481,6 +487,17 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 if name == "bash":
                     _key = "command" if "command" in args else ("cmd" if "cmd" in args else None)
                     _cmd = args.get(_key) if _key else None
+                    # Steer `secsuite ...` shelled through bash to the real tool
+                    # (it is an MCP/toolbelt tool, not a CLI binary) instead of
+                    # letting it 'command not found' and spiral.
+                    if _cmd and re.match(r"^\s*(sudo\s+)?secsuite\b", _cmd):
+                        res = ('secsuite is a TOOL, not a shell binary — do not run it via bash. '
+                               'Call it as <tool_call>{"name":"secsuite","arguments":{"action":"http_send",'
+                               '"url":"..."}}</tool_call> (actions: http_send, search_traffic, jwt_decode, '
+                               'jwt_forge, jwt_none_attack, compare_responses, send_parallel).')
+                        transcript.append((name, args, res))
+                        results.append(react.format_result(name, res))
+                        continue
                     if _cmd and not _cmd.lstrip().startswith("cd "):
                         args = {**args, _key: f"cd {shlex.quote(cwd)} && {_cmd}"}
                 elif name in ("write_file", "read_file"):
