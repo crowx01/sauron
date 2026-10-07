@@ -1028,6 +1028,83 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
     )
 
 
+class _BoxedPrompt:
+    """Claude-Code-style input: a full-width bordered box with a '> ' marker and
+    a dim footer below it. Enter submits, Alt+Enter / Ctrl-J insert a newline,
+    Shift+Tab cycles the permission mode, Ctrl-C/Ctrl-D cancel. Duck-types the
+    PromptSession interface used by _read_line (``prompt_async``)."""
+
+    def __init__(self, session_id: str, state: _ReplState):
+        self.state = state
+        self.history = chat_history.JsonlSessionHistory(session_id)
+        self.completer = _SlashCompleter() if _PT_OK else None
+
+    async def prompt_async(self, _message=None, *, _input=None, _output=None) -> str:
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.widgets import Frame, TextArea
+
+        state = self.state
+        ta = TextArea(
+            multiline=True, prompt="> ", wrap_lines=True,
+            history=self.history, completer=self.completer, complete_while_typing=True,
+        )
+        res = {"text": None, "signal": None}
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _submit(event):
+            res["text"] = ta.text
+            event.app.exit()
+
+        @kb.add("escape", "enter")
+        @kb.add("c-j")
+        def _newline(event):
+            ta.buffer.insert_text("\n")
+
+        @kb.add("c-c")
+        def _int(event):
+            res["signal"] = "int"
+            event.app.exit()
+
+        @kb.add("c-d")
+        def _eof(event):
+            if not ta.text:
+                res["signal"] = "eof"
+                event.app.exit()
+
+        @kb.add("s-tab")
+        @kb.add("escape", "[", "Z")
+        def _cycle(event):
+            state.cycle_perm()
+            event.app.invalidate()
+
+        def _footer():
+            return HTML(
+                f"<style fg='#888888'>{_PERM_LABEL[state.perm]}  ·  shift+tab  ·  "
+                f"{state.model or 'auto'}</style>"
+            )
+
+        layout = Layout(HSplit([Frame(ta), Window(FormattedTextControl(_footer), height=1)]))
+        app = Application(
+            layout=layout, key_bindings=kb, full_screen=False,
+            erase_when_done=True, mouse_support=False,
+            input=_input, output=_output,
+        )
+        if _input is None:  # real terminal: keep scrollback clean
+            with patch_stdout():
+                await app.run_async()
+        else:  # test / headless: no patch_stdout (needs a real stdout)
+            await app.run_async()
+        if res["signal"] == "int":
+            raise KeyboardInterrupt
+        if res["signal"] == "eof":
+            raise EOFError
+        return (res["text"] or "").strip()
+
+
 async def _read_line(session, cwd: str) -> str:
     """Read one submitted line, preferring the prompt_toolkit session (rich
     history/multiline UX); fall back to plain rich input if prompt_toolkit
@@ -1471,10 +1548,14 @@ async def _run(handle):
 
     session = None
     if _PT_OK and sys.stdin.isatty():
+        _boxed = os.getenv("PAL_CHAT_BOX", "1").strip().lower() not in ("0", "false", "off", "no")
         try:
-            session = _build_prompt_session(session_id, state)
+            session = _BoxedPrompt(session_id, state) if _boxed else _build_prompt_session(session_id, state)
         except Exception:
-            session = None  # e.g. no real TTY -- fall back to plain input
+            try:
+                session = _build_prompt_session(session_id, state)  # fall back to the plain session
+            except Exception:
+                session = None  # no real TTY -- fall back to plain input
 
     while True:
         try:
