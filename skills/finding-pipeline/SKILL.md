@@ -1,14 +1,21 @@
 ---
-name: validator
+name: finding-pipeline
 description: >-
-  Skeptical QA reviewer skill for offensive-security findings. Runs the sauron 4-step validation
-  pipeline before any finding is reported. Triggers on: 'validate this finding', 'before I submit',
-  'check my PoC', 'is this a false positive', 'score this severity'.
+  Orchestrates sauron's 4-step validation pipeline over a confirmed finding before it is presented
+  or reported: stress-test, close the evidence gaps, adversarial debate, synthesize. It does not
+  review the finding itself -- step A delegates that to the `validator` reviewer skill, and step D
+  delegates the prose to groq. Triggers on: 'run the pipeline', 'validate this finding', 'before I
+  submit', 'check my PoC', 'is this a false positive', 'score this severity'.
 ---
 
-# validator
+# finding-pipeline
 
-**One-line pitch:** Skeptical QA reviewer skill for offensive-security findings. Runs the sauron framework's 4-step validation pipeline before any finding is reported.
+**One-line pitch:** Runs sauron's 4-step validation pipeline over a confirmed finding before it is presented or reported. It is the orchestration, not the review: step A calls the `validator` reviewer, step C calls PAL, step D calls groq.
+
+> Renamed from `validator`. It collided with the `validator` reviewer skill in the pentesting
+> knowledge base (https://github.com/Darxbloo/Pentesting-Agent-new), which is the skill step A is supposed to call — so under the old name this
+> file described a pipeline whose first step invoked itself, and whichever `validator` happened to
+> sit in the skills directory decided what the hook reached.
 
 ## When to invoke
 - After any new confirmed vulnerability finding, PoC, or draft report.
@@ -18,7 +25,7 @@ description: >-
 ## The 4-step pipeline
 
 ### Step A. Stress-test
-Invoke the validator's own review over the finding. Produce twelve fields:
+Invoke the `validator` skill — the skeptical senior reviewer, which does not hunt for bugs itself but stress-tests one already found. It returns twelve fields:
 
 - **Confidence Score** (0-100)
 - **False Positive Risk** (Low/Medium/High + the alternative explanation ruled out)

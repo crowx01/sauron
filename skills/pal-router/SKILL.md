@@ -24,7 +24,8 @@ If the task is a user-facing decision, an exploitation choice, a severity call, 
 
 - **groq** (`openai/gpt-oss-120b`, ~500 req/min, 8,000 tokens/min cap). Report writing, vulnerability and concept explanations, skeptical validation. Aliases: `groq`, `gpt-oss-120b`, `gpt-oss`.
 - **nemotron** (`nvidia/nemotron-3.5-lightning:free` via OpenRouter, 1M context, alias `nemotron`). Bulk reading of large files. Do NOT use for strict structured extraction (it hallucinates).
-- **grok** (`x-ai/grok-4.1-fast` when available, else `x-ai/grok-4.3` on OpenRouter, 2M context). Permissive high-context security reasoning. Reliable fallback when Gemini refuses.
+- **grok** (`x-ai/grok-4.3` on OpenRouter, 1M context). Permissive high-context security reasoning. Reliable fallback when Gemini refuses — but **paid**: it returns HTTP 402 on an account with no purchased credits, and `x-ai/grok-4` / `x-ai/grok-4.1-fast` are no longer served by OpenRouter (checked 2026-09-26).
+- **nemotron-ultra** (`nvidia/nemotron-3-ultra-550b-a55b:free` via OpenRouter, 1M context, alias `nemotron-ultra`). Strongest free reasoning model. Use it wherever this map says grok if the OpenRouter account has no credits.
 - **flash** (`gemini-3.6-flash`, 1M context, alias `flash`). Fast structured extraction from prose. Failure mode: refuses recon-log or attack-surface analysis for named targets.
 - **or-free** (`openrouter/free` meta-router, 200K context). Generalist fallback.
 - **pro** (`gemini-3.1-pro-preview`, 1M context, alias `pro`). Deep reasoning and adversarial debate via `mcp__pal__challenge`.

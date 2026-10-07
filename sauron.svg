@@ -143,8 +143,8 @@
     <!-- top-left (150 deg) -->
     <g transform="translate(392.15 195)">
       <polygon points="-70,-30 70,-30 90,0 70,30 -70,30 -90,0" fill="url(#node)" stroke="#a83e08" stroke-width="1.6"/>
-      <text y="-4" font-size="16" font-weight="700" fill="#ffb84a">grok-4.1-fast</text>
-      <text y="16" font-size="10" fill="#c8a680">recon reasoning · 2M</text>
+      <text y="-4" font-size="16" font-weight="700" fill="#ffb84a">grok-4.3</text>
+      <text y="16" font-size="10" fill="#c8a680">recon reasoning · 1M</text>
     </g>
     <!-- bottom-left (210 deg) -->
     <g transform="translate(392.15 435)">

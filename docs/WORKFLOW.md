@@ -5,13 +5,14 @@ From cold box to shipping a finding, without burning Claude's context on busy wo
 ## 1. One-time install (5 min)
 
 1. Install sauron — the core engine (crowx01's routing-enhanced fork with capability-rank cross-provider auto model selection) now ships **bundled inside sauron at `./core`**, no separate download. On the claude-code path `setup.sh` provisions and registers it for you under `mcpServers.pal`; for other orchestrators, start it with `sauron serve` or register `core/server.py` there manually. (Lineage: BeehiveInnovations/pal-mcp-server, formerly zen-mcp-server; this fork carries the smarter routing.)
-2. Clone this repo.
-3. Run `./setup.sh` from the sauron root. The wizard walks you through:
+2. Clone the pentesting knowledge base (https://github.com/Darxbloo/Pentesting-Agent-new) and copy its `skills/` and `agents/` into `~/.claude/`. It supplies `pentesting-agent` and `validator`, which the generated hook auto-loads; sauron does not ship them.
+3. Clone this repo.
+4. Run `./setup.sh` from the sauron root. The wizard walks you through:
    - **Scope.** Global (`~/.claude/settings.json`, loads every session, every project) or per-project (`./.claude/settings.json`, only loads when Claude Code runs inside that project). Per-project is the default choice unless you want the framework everywhere.
    - **Auto-load skills.** Pick which skills fire as the first tool calls of every session (caveman, pentesting-agent, validator).
    - **Delegate-first policy.** Pick which PAL models you have keys for (groq, nemotron, grok, flash, or-free, pro). Unselected models are dropped from the rendered hook so Claude never tries to route to them.
-4. Fill in your API keys in the generated `.env.sauron.example` and source it from your shell rc.
-5. Symlink each chosen skill into the skills folder Claude Code discovers from. `setup.sh` will offer to do this for you; the manual equivalent:
+5. Fill in your API keys in the generated `.env.sauron.example` and source it from your shell rc.
+6. Symlink each chosen skill into the skills folder Claude Code discovers from. `setup.sh` will offer to do this for you; the manual equivalent:
    ```bash
    # global install
    SAURON=~/tools/sauron   # path to your local sauron clone
@@ -23,7 +24,7 @@ From cold box to shipping a finding, without burning Claude's context on busy wo
    mkdir -p ./.claude/skills
    for d in "$SAURON"/skills/*/; do ln -sfn "$d" ./.claude/skills/$(basename "$d"); done
    ```
-6. Restart Claude Code so the new hook takes effect.
+7. Restart Claude Code so the new hook takes effect.
 
 ## 2. Every session boot (automatic, ~2s)
 
@@ -182,7 +183,7 @@ Both adapted from [amElnagdy/review-skills](https://github.com/amElnagdy/review-
 │           v                                                                │
 │    parse route?                                                            │
 │      +---- deterministic  ->  jq / grep locally (0 tokens)                 │
-│      +---- LLM reasoning  ->  PAL(grok, 2M ctx)                            │
+│      +---- LLM reasoning  ->  PAL(grok 1M, paid; else nemotron-ultra 1M)   │
 │      +---- huge JS bundle ->  PAL(nemotron, 1M ctx)                        │
 │      +---- structured     ->  PAL(flash) -> fallback or-free               │
 │      +---- report writeup ->  PAL(groq) -> Claude byte-checks              │

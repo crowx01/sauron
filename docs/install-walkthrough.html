@@ -137,7 +137,8 @@
 
 <!-- ============ PAGE: overview + orchestrator ============ -->
 <div class="section">
-  <p>The installer runs end-to-end. Prompt 0 picks the orchestrator (claude, cursor, cline, codex,
+  <p>You can also install via <code>npx --yes github:crowx01/sauron</code>. The installer runs
+  end-to-end. Prompt 0 picks the orchestrator (claude, cursor, cline, codex,
   aider or generic). Prompt 7 collects API keys with per-provider instructions and writes a
   <code>0600 .env</code>. Setup now also writes a <code>CLAUDE.md</code> doctrine file that is
   auto-loaded and prompt-cache friendly, so the routing map, keep-in-Claude rules, and 4-step
@@ -152,7 +153,8 @@
     skill gained 11 token-efficiency rules (auto-compress outputs over 5&nbsp;KB, batch PAL calls,
     { claim, confidence, source_span } triples, in-conversation failure-map, diff-first, response
     terseness ladder). Sibling detection dedups doctrine when both sauron and let-there-be-light
-    are installed. <b>The core engine now ships bundled inside sauron at <code>./core</code></b> — the routing-enhanced fork, no separate download.
+    are installed. Models also get gh/bash/clink via native function-calling, extending the
+    engine's agentic toolbelt. <b>The core engine now ships bundled inside sauron at <code>./core</code></b> — the routing-enhanced fork, no separate download.
   </div>
 
   <h2>1. The orchestrator choice</h2>
@@ -164,6 +166,12 @@
     <tr><td class="key">a</td><td class="name">aider</td><td>writes <code>./.aider.sauron.md</code>; add to <code>.aider.conf.yml</code> as <code>read:</code></td></tr>
     <tr><td class="key">g</td><td class="name">generic</td><td>writes <code>./SYSTEM_PROMPT.sauron.md</code> you paste into any tool; copies skills alongside</td></tr>
   </table>
+
+  <h3>The caveman skill</h3>
+  <p>caveman mode compresses output tokens by stripping filler while preserving all evidence
+  byte-exact. <b>lite</b> mode trims hedges and keeps sentence structure for ~15% token reduction.
+  <b>full</b> mode uses telegraphic prose, dropping articles and copula where safe for ~40% cut.
+  <b>ultra</b> mode hits ~60% by keeping only nouns, verbs, numerals and fenced evidence.</p>
 </div>
 
 <!-- ============ PAGE: terminal session ============ -->
@@ -191,6 +199,8 @@
   x) codex-cli (OpenAI)         writes ~/.codex/instructions.md
   a) aider                      writes .aider.conf.yml + FRAMEWORK.md conventions
   g) generic / other            writes SYSTEM_PROMPT.md you paste into any tool
+  <span class="muted">(space to toggle, enter to confirm)</span>
+  <span class="muted">resuming from checkpoint 3/7</span>
 <span class="ok">✓ orchestrator: c</span>
 
 <span class="prompt">1. Where should it install?</span>
@@ -268,7 +278,7 @@ sibling and writes a lean block that skips the shared sections.</p>
 ## Delegate-first routing
 groq (gpt-oss-120b, ~500 rpm, 8000 tpm cap) for report writing, vuln explanations, and
 skeptical validation. nemotron (nvidia, 1M ctx) for bulk reading of large files. grok
-(x-ai, 2M ctx) for permissive high-context security reasoning when Gemini refuses. flash
+(x-ai grok-4.3, 1M ctx, paid) for permissive high-context security reasoning when Gemini refuses. flash
 (gemini-3.6-flash, 1M ctx) for fast structured extraction. or-free (OpenRouter meta-router,
 200K ctx) as generalist fallback. pro (gemini-3.1-pro-preview) for deep-reasoning fallback
 and adversarial debate via mcp__pal__challenge.

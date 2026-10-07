@@ -17,10 +17,13 @@ I built Sauron as a collection of skills that let my AI orchestrator become the 
 
 | Skill | Job | Source |
 |-------|-----|--------|
-| [`validator`](skills/validator/SKILL.md) | Skeptical QA reviewer that runs the 4-step validation pipeline before any finding is reported. | mine |
+| [`finding-pipeline`](skills/finding-pipeline/SKILL.md) | Orchestrates the 4-step validation pipeline over a confirmed finding. Not the reviewer: step A calls the `validator` skill from the knowledge base, step C calls PAL, step D calls groq. Renamed from `validator`, which collided with that reviewer. | mine |
 | [`pal-router`](skills/pal-router/SKILL.md) | Delegate-first + failover doctrine for dispatching sub-tasks to cheaper or free PAL models. | mine |
 | [`debate-review`](skills/debate-review/SKILL.md) | Two-model debate review of a GitHub PR, GitLab MR, or Azure DevOps PR. Posts inline P0/P1/P2 comments from your own gh/glab/az. | adapted from [amElnagdy/review-skills](https://github.com/amElnagdy/review-skills) (MIT) |
 | [`babysit-pr`](skills/babysit-pr/SKILL.md) | Works PR review rounds automatically: verifies findings, fixes blockers, replies in-thread, resolves, re-runs. | adapted from [amElnagdy/review-skills](https://github.com/amElnagdy/review-skills) (MIT) |
+| [`pal-learn`](skills/pal-learn/SKILL.md) | Files an observed routing fact (refusal, 402, withdrawn model ID, hallucination, working fallback) back into the model map, verified against the live provider first. Keeps the routing knowledge from going stale. | mine, adapting the `pentest-learn` loop from [Pentesting-Agent-new](https://github.com/Darxbloo/Pentesting-Agent-new) |
+| `pentesting-agent`, and 40 vulnerability-category skills | The offensive-security knowledge base the generated hook auto-loads: authorization gate, triage decision tree, per-class methodology/tooling/reporting/case-patterns. Plus `agents/pentester.md`, `pentest-learn` and `pentest-debrief`. | **not shipped here** - install from [Pentesting-Agent-new](https://github.com/Darxbloo/Pentesting-Agent-new) |
+| `caveman` | Ultra-compressed output that keeps code, commands and evidence byte-exact. Auto-loaded at session start in `full` mode. | **not shipped here** - install from [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) (skills tree MIT; its engine dirs are BSL-1.1) |
 
 ## Model routing workflow
 
@@ -31,10 +34,10 @@ flowchart TD
     U[user prompt<br/>+ recon output / files] --> R{classify task}
     R -->|report writing /<br/>vuln explanation /<br/>skeptical validation| GRQ[groq<br/>gpt-oss-120b<br/>~500 rpm · 8k tpm]
     R -->|bulk read of<br/>logs / large scans| NEM[nemotron<br/>NVIDIA · 1M ctx<br/>NOT for JSON schema]
-    R -->|permissive security<br/>reasoning /<br/>Gemini refused| GRK[grok<br/>x-ai · 2M ctx]
+    R -->|permissive security<br/>reasoning /<br/>Gemini refused| GRK[grok<br/>x-ai grok-4.3 · 1M · paid<br/>nemotron-ultra if no credits]
     R -->|structured extract<br/>API / config /<br/>OpenAPI| FLS[flash<br/>Gemini 3.6-flash · 1M ctx<br/>refuses named recon]
     R -->|generic fallback| ORF[or-free<br/>OpenRouter meta-router]
-    R -->|adversarial debate /<br/>deep chain analysis| PRO[pro<br/>Gemini 3 Pro preview]
+    R -->|adversarial debate /<br/>deep chain analysis| PRO[pro<br/>Gemini 3.1 Pro preview]
     GRQ & NEM & GRK & FLS & ORF & PRO --> V{envelope /<br/>refusal check}
     V -->|clean| OUT[to orchestrator<br/>severity + safety<br/>side-effects stay here]
     V -->|classifier refused /<br/>rate limited| RT[re-route to next]
@@ -58,7 +61,7 @@ flowchart TD
                 ▼    ▼    ▼    ▼    ▼    ▼
               groq  nemo   grok  flash  or-free   pro
               gpt-  NVIDIA x-ai  Gemini  OR meta  Gemini 3
-              oss-  1M     2M    3.6-    router   Pro pre
+              oss-  1M     1M    3.6-    router   Pro pre
               120b  ctx    ctx   flash   200K     (challenge)
                 │    │    │    │    │    │
                 └────┴────┴─┬──┴────┴────┘
@@ -83,7 +86,7 @@ Full matrix: [skills/pal-router/model-map.md](skills/pal-router/model-map.md).
 3. Adversarial debate via `mcp__pal__challenge` (pro primary, groq fallback).
 4. Synthesize + write (delegate prose to groq; human sanity-checks byte-exact against evidence).
 
-Full spec: [skills/validator/SKILL.md](skills/validator/SKILL.md).
+Full spec: [skills/finding-pipeline/SKILL.md](skills/finding-pipeline/SKILL.md).
 
 ## Orchestrators
 
@@ -267,6 +270,21 @@ flowchart TD
 > friendlier way to produce the same file.
 
 Then restart your orchestrator.
+
+## Keeping it true
+
+The routing map is a claim about a moving target: models get withdrawn, free tiers change, refusal
+behaviour shifts. Sauron borrows the compounding loop from the pentesting knowledge base rather than
+leaving these as static notes:
+
+| Trigger | Skill | What happens |
+|---|---|---|
+| A model refuses, 402s, 404s, hallucinates, or a fallback saves a route | [`pal-learn`](skills/pal-learn/SKILL.md) | Verifies the behaviour against the live provider, then enriches that model's entry in the map, the failover order, and any doc or hook string that names it |
+| Before a finding is reported | [`finding-pipeline`](skills/finding-pipeline/SKILL.md) | Runs the 4-step pipeline: stress-test (via the knowledge base's `validator`), close the evidence gaps, adversarial challenge, synthesize |
+| End of an engagement | `pentest-debrief` (knowledge base) | Mines the session for techniques and dead ends and files them |
+
+The rule all three share: verify before filing, deduplicate against what is already written, and
+correct a wrong claim rather than stacking a caveat on it.
 
 ## Real-world lessons
 

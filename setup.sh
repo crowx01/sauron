@@ -252,7 +252,7 @@ else
   MODEL_LABELS=(
     "groq       gpt-oss-120b     report writing, validation (+ qwen3 tool executor, same Groq key)"
     "nemotron   nvidia (OR)      bulk reading, 1M ctx"
-    "grok       x-ai (OR)        permissive security reasoning, 2M ctx"
+    "grok       x-ai (OR)        permissive security reasoning, 1M ctx (paid)"
     "flash      gemini-3.6       structured extraction"
     "or-free    OR meta-router   generalist fallback"
     "pro        gemini-3.1-pro   adversarial debate"
@@ -274,7 +274,7 @@ fi
 ROUTING=""
 [ "$M_GROQ" = 1 ] && { ROUTING+="groq (gpt-oss-120b, ~500 rpm, 8000 tpm cap) for report writing, vuln explanations, and skeptical validation; qwen3 (qwen/qwen3.8-27b via Groq) is the default tool executor for \`pal run\` and /tools (gpt-oss trips Groq's output parser on tool prompts). Delegate whole jobs with \`pal run --plan <file>\` (or \`--agent\` for heavy coding/tool work). "; }
 [ "$M_NEMO" = 1 ] && ROUTING+="nemotron (nvidia, 1M ctx) for bulk reading of large files. "
-[ "$M_GROK" = 1 ] && ROUTING+="grok (x-ai, 2M ctx) for permissive high-context security reasoning when Gemini refuses. "
+[ "$M_GROK" = 1 ] && ROUTING+="grok (x-ai/grok-4.3, 1M ctx) for permissive high-context security reasoning when Gemini refuses. "
 [ "$M_FLSH" = 1 ] && ROUTING+="flash (gemini-3.6-flash, 1M ctx) for fast structured extraction. "
 [ "$M_ORFR" = 1 ] && ROUTING+="or-free (OpenRouter meta-router, 200K ctx) as generalist fallback. "
 [ "$M_PRO" = 1 ]  && ROUTING+="pro (gemini-3.1-pro-preview) for deep-reasoning fallback and adversarial debate via mcp__pal__challenge. "
@@ -608,7 +608,37 @@ TBJSON
 }
 checkpoint pal_register "PAL MCP registration" register_pal
 
+# ---------- 11b. sanity-check: do the auto-loaded skills actually exist? ----------
+# A hook that orders Skill(x) for a skill that is not installed makes every session start
+# with a failing tool call, and nothing in the error says which skill or where to get it.
+if [ "$ORCH" = "c" ]; then
+  SKILL_DIRS="$HOME/.claude/skills"
+  [ "$SCOPE" = "p" ] && SKILL_DIRS="$PWD/.claude/skills $SKILL_DIRS"
+  skill_present () {
+    local name="$1" d
+    # shellcheck disable=SC2086 -- SKILL_DIRS is a deliberate space-separated list
+    for d in $SKILL_DIRS; do [ -e "$d/$name/SKILL.md" ] && return 0; done
+    return 1
+  }
+  for pair in "$S_CAVE:caveman" "$S_PENT:pentesting-agent" "$S_VALI:validator"; do
+    sel="${pair%%:*}"; name="${pair#*:}"
+    [ "$sel" = 1 ] || continue
+    if skill_present "$name"; then
+      ok "skill present: $name"
+    else
+      warn "skill NOT found: $name (looked in: $SKILL_DIRS)"
+      [ "$name" = caveman ] && warn "  get it from https://github.com/JuliusBrussee/caveman"
+      case "$name" in pentesting-agent|validator)
+        warn "  get it from https://github.com/Darxbloo/Pentesting-Agent-new" ;;
+      esac
+      warn "  every session will open with a failing Skill($name) call until you install it."
+    fi
+  done
+fi
+
 # ---------- 12. API keys ----------
+
+
 NEEDS_ENV=0
 M_OPENAI=0
 for f in "$M_GROQ" "$M_NEMO" "$M_GROK" "$M_FLSH" "$M_ORFR" "$M_PRO"; do

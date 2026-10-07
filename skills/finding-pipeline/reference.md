@@ -4,7 +4,7 @@ Every new confirmed finding runs through this loop before it is presented or rep
 
 ## Step A. Validator stress-test
 
-Invoke the `validator` skill, a skeptical senior QA reviewer. It returns twelve output fields: Confidence Score, False Positive Risk, Exploitability, Impact, Missing Evidence, Missing Tests, Suggested Attack Chains, Suggested Manual Verification, Suggested Automation, Suggested Report Improvements, Suggested Severity, and Final Verdict.
+Invoke the `validator` skill, a skeptical senior QA reviewer (shipped by the pentesting knowledge base, not by sauron). It returns twelve output fields: Confidence Score, False Positive Risk, Exploitability, Impact, Missing Evidence, Missing Tests, Suggested Attack Chains, Suggested Manual Verification, Suggested Automation, Suggested Report Improvements, Suggested Severity, and Final Verdict.
 
 If the verdict is anything other than Confirmed or Likely Valid, the pipeline pauses and gaps are addressed before continuing.
 
