@@ -602,6 +602,43 @@ _CTX_BUDGET = int(os.getenv("PAL_CHAT_CTX_CHARS", "6000"))
 _CTX_MAX_TURNS = int(os.getenv("PAL_CHAT_CTX_MAX_TURNS", "200"))
 
 
+def _status_panel(selected_model: str | None, cwd: str) -> Panel:
+    """Show the engine's token-saving / self-dependence posture: caveman,
+    headroom, plan-only, auto-debate, orchestrator, and the storage backend."""
+    def _on(v: bool) -> str:
+        return "[green]on[/]" if v else "[dim]off[/]"
+
+    try:
+        from providers.router import caveman
+
+        cav = f"engine {_on(caveman.is_enabled())}" + (f" ({caveman.level()})" if caveman.is_enabled() else "")
+    except Exception:  # noqa: BLE001
+        cav = "engine [dim]?[/]"
+    try:
+        from providers.router import headroom_adapter
+
+        head = _on(headroom_adapter.is_enabled())
+    except Exception:  # noqa: BLE001
+        head = "[dim]?[/]"
+    orch = _orchestrator_cli()
+    orch_av = _orchestrator_available()
+    storage = os.getenv("PAL_STORAGE", "memory")
+    rows = Group(
+        Text.assemble(("engine posture", "bold cyan")),
+        Text.from_markup(f"caveman    {cav}  [dim](skill attaches at session start)[/]"),
+        Text.from_markup(f"headroom   {head}  [dim](compresses tool output at the provider boundary)[/]"),
+        Text.from_markup(
+            f"execution  {'[green]engine only[/] (claude = planning)' if _claude_plan_only() else '[yellow]claude allowed[/]'}"
+        ),
+        Text.from_markup(f"auto-debate {_on(_auto_debate_enabled())}  [dim](huge tasks → executor→reviewer→judge)[/]"),
+        Text.from_markup(
+            f"orchestrator '{orch}' {'[green]present[/]' if orch_av else '[dim]absent → self-orchestrate[/]'}"
+        ),
+        Text.from_markup(f"storage    {storage}  ·  model {selected_model or 'auto (routed)'}"),
+    )
+    return Panel(rows, title="status", title_align="left", border_style="cyan", padding=(0, 1))
+
+
 def _new_session_id() -> str:
     """Human-legible, unique id for one chat session (timestamp + short random),
     used as the durable key in session_store so /resume can name it."""
@@ -858,7 +895,7 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             style="dim",
         ),
         Text(
-            "context: /context · /history · /compact · /clear · /resume [id|list] (persists across restarts)",
+            "context: /context · /history · /compact · /clear · /resume [id|list] · /status (persists across restarts)",
             style="dim",
         ),
         Text(
@@ -1268,7 +1305,11 @@ async def _run(handle):
             if err:
                 console.print(f"[red]compact failed: {err}[/] [dim](history left intact)[/]")
             else:
+                _persist()  # save the folded history so a restart keeps the compaction
                 console.print(f"[dim]compacted {folded} older turn(s) into a summary[/]")
+            continue
+        if low in ("/status", "/stat"):
+            console.print(_status_panel(selected_model, cwd))
             continue
         if low in ("/model", "/pick"):
             selected_model = await _pick_model_menu(session, cwd, selected_model)

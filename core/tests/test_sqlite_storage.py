@@ -87,6 +87,17 @@ def test_session_store_save_is_upsert_and_recent_orders(monkeypatch, tmp_path):
     assert next(r for r in rows if r["id"] == "b")["turns"] == 2
 
 
+def test_session_store_prunes_old_sessions(monkeypatch, tmp_path):
+    ss = _fresh_store(monkeypatch, tmp_path)
+    monkeypatch.setenv("PAL_SESSION_KEEP", "3")
+    for i in range(6):
+        ss.save(f"s{i}", [{"role": "user", "content": str(i)}])
+    rows = ss.recent(50)
+    assert len(rows) == 3                                  # capped at PAL_SESSION_KEEP
+    assert {r["id"] for r in rows} == {"s3", "s4", "s5"}   # oldest pruned
+    assert ss.load("s0") is None
+
+
 def test_session_store_degrades_when_unavailable(monkeypatch, tmp_path):
     ss = _fresh_store(monkeypatch, tmp_path)
     # point at an unwritable path and drop the cached connection

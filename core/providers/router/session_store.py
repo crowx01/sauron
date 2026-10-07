@@ -83,6 +83,16 @@ def save(session_id: str, history: list[dict], cwd: str = "", model: str = "") -
                 (session_id, cwd, model, len(history), time.time(),
                  json.dumps(history, ensure_ascii=False)),
             )
+            # Bound growth: keep only the most-recent PAL_SESSION_KEEP sessions.
+            try:
+                keep = max(1, int(os.getenv("PAL_SESSION_KEEP", "200")))
+                conn.execute(
+                    "DELETE FROM chat_sessions WHERE id NOT IN "
+                    "(SELECT id FROM chat_sessions ORDER BY updated_at DESC LIMIT ?)",
+                    (keep,),
+                )
+            except (ValueError, sqlite3.Error):
+                pass
             conn.commit()
             return True
         except Exception as exc:  # noqa: BLE001
