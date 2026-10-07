@@ -245,6 +245,22 @@ def test_think_verb_is_from_the_set():
     assert chat_repl._think() in chat_repl._THINK_VERBS
 
 
+def test_is_smalltalk_detects_greetings_not_tasks():
+    for g in ("hi", "hey", "hello!", "thanks", "how are you", "who are you", "yo", "bye"):
+        assert chat_repl._is_smalltalk(g) is True
+    for task in ("list the files", "scan example.com", "nmap -sV host", "write a parser", "fix this bug"):
+        assert chat_repl._is_smalltalk(task) is False
+
+
+def test_bubble_is_plain_not_boxed():
+    from rich.markdown import Markdown
+    from rich.text import Text
+
+    assert isinstance(chat_repl._bubble("m", "hello **world**"), Markdown)   # plain markdown, no Panel
+    err = chat_repl._bubble("m", "__ERROR__boom")
+    assert isinstance(err, Text) and err.style == "red"
+
+
 def test_stream_on_requires_tty_session_and_env(monkeypatch):
     monkeypatch.delenv("PAL_CHAT_STREAM", raising=False)
     assert chat_repl._stream_on(object()) is True       # a session present -> on
