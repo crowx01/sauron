@@ -31,6 +31,7 @@ import sys
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.text import Text
 
 try:
@@ -577,13 +578,34 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     return last_ans, last_transcript, last_model
 
 
-def _bubble(model: str, answer: str, *, role: str = "pal", color: str = "green") -> Panel:
+# ---- consistent visual language --------------------------------------------
+# One glyph + color per message kind so every surface (notices, bubbles, tool
+# trace) reads the same: the user can tell input / assistant / tool / warning /
+# error / system apart at a glance without reading the words.
+_GLYPH = {
+    "pal": "◆", "tools": "⚙", "agent": "✦", "debate": "⚖",
+    "sys": "·", "warn": "⚠", "err": "✗", "ok": "✓", "route": "→",
+}
+_STYLE = {
+    "pal": "green", "tools": "cyan", "agent": "magenta", "debate": "blue",
+    "sys": "dim", "warn": "yellow", "err": "red", "ok": "green", "route": "dim",
+}
+
+
+def _note(msg: str, kind: str = "sys") -> None:
+    """One-line status line with a consistent glyph+color for its kind."""
+    console.print(f"[{_STYLE.get(kind, 'dim')}]{_GLYPH.get(kind, '·')} {msg}[/]")
+
+
+def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = None) -> Panel:
+    color = color or _STYLE.get(role, "green")
+    glyph = _GLYPH.get(role, "◆")
     if answer.startswith("__ERROR__"):
         body: object = Text(answer[len("__ERROR__") :], style="red")
-        color = "red"
+        color, glyph = "red", _GLYPH["err"]
     else:
         body = Markdown(answer)
-    title = Text.assemble((role, f"bold {color}"), (f"  ·  {model}", "dim"))
+    title = Text.assemble((f"{glyph} {role}", f"bold {color}"), (f"  ·  {model}", "dim"))
     return Panel(body, title=title, title_align="left", border_style=color, padding=(0, 1))
 
 
@@ -873,37 +895,51 @@ def _models_table() -> str:
         _logging.disable(_prev)
 
 
-def _header(cheap: str | None, smart: str | None) -> Panel:
-    lines = Group(
-        Text.assemble(("sauron", "bold cyan"), (" · one agent to route them all", "bold")),
-        Text.assemble(
-            ("cheap ", "dim"),
-            (str(cheap or "—"), "green"),
-            ("   smart ", "dim"),
-            (str(smart or "—"), "magenta"),
-        ),
-        Text(
-            "message = RUNS with full tools on Kali (no /tools needed) · /ask <q> = plain chat",
-            style="dim",
-        ),
-        Text(
-            "/agent[:edit|:plan|:review] <task> (full Claude Code) · /debate · /delegate <model>",
-            style="dim",
-        ),
-        Text(
-            "/model · /models · /ask · /cheap · /smart · /agent · /help · /exit",
-            style="dim",
-        ),
-        Text(
-            "context: /context · /history · /compact · /clear · /resume [id|list] · /status (persists across restarts)",
-            style="dim",
-        ),
-        Text(
-            "Enter sends · Alt+Enter/Ctrl-J newline · ↑/↓ history (line-aware in multiline) · Ctrl-P/Ctrl-N history",
-            style="dim",
-        ),
-    )
-    return Panel(lines, border_style="cyan", padding=(0, 1))
+def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
+    """Cohesive welcome / help panel: brand, live session context, then the
+    command groups and keys. Extra context (session/cwd/model/storage/policy)
+    is optional so /help can call it with just the routing pair."""
+    model = ctx.get("model") or "auto (routed)"
+    session_id = ctx.get("session_id", "")
+    cwd = ctx.get("cwd", "")
+    storage = ctx.get("storage", os.getenv("PAL_STORAGE", "memory"))
+    plan_only = ctx.get("plan_only", _claude_plan_only())
+    orch_present = ctx.get("orch_present")
+    orch_cli = ctx.get("orch_cli", _orchestrator_cli())
+
+    if orch_present is False:
+        policy = f"no '{orch_cli}' orchestrator → self-orchestrate on engine models"
+    elif plan_only:
+        policy = "claude = planning only → execution on engine models (saves tokens)"
+    else:
+        policy = "claude may execute (plan-only off)"
+
+    def _row(label, *parts):
+        return Text.assemble((f"  {label:<8}", "dim"), *parts)
+
+    rows = [
+        Text.assemble(("◆ ", "bold cyan"), ("sauron", "bold cyan"),
+                      ("   one agent to route them all", "dim")),
+        Rule(style="cyan"),
+        _row("routing", ("cheap ", "dim"), (str(cheap or "—"), "green"),
+             ("   smart ", "dim"), (str(smart or "—"), "magenta")),
+        _row("model", (str(model), "")),
+    ]
+    if session_id:
+        rows.append(_row("session", (session_id, ""), ("  ·  ", "dim"),
+                         (f"store:{storage}", "dim"), ("  ·  ", "dim"), (cwd, "dim")))
+    rows += [
+        _row("agent", (policy, "dim")),
+        Rule(style="cyan"),
+        _row("chat", ("message = run with tools  ·  ", "dim"),
+             ("/ask /cheap /smart", "cyan"), (" = plain chat", "dim")),
+        _row("agent", ("/agent[:edit|:plan|:review]", "cyan"),
+             ("  ·  ", "dim"), ("/delegate <model>", "cyan"), ("  ·  ", "dim"), ("/debate", "cyan")),
+        _row("memory", ("/context /history /compact /clear /resume /status", "cyan")),
+        _row("models", ("/model /models", "cyan"), ("   ", "dim"), ("/help /exit", "cyan")),
+        Text("  keys: Enter send · Alt+Enter newline · ↑/↓ history · Ctrl-P/Ctrl-N history", style="dim"),
+    ]
+    return Panel(Group(*rows), border_style="cyan", padding=(0, 1))
 
 
 def _available_models() -> list[str]:
@@ -1180,10 +1216,6 @@ async def _run(handle):
     selected_model: str | None = os.getenv("PAL_CHAT_MODEL") or None  # /model or PAL_CHAT_MODEL pins it
     last_answer: str = ""  # most recent assistant reply, fed to PAL by /feed
     r0 = chat_router.route("hi", _is_available)
-    console.print(_header(r0["cheap"], r0["smart"]))
-    if selected_model:
-        console.print(f"[dim]pinned model (PAL_CHAT_MODEL): [bold]{selected_model}[/] — "
-                      "use /plan <goal> to draft, /feed to run it through PAL[/]")
 
     from providers.router import session_store
 
@@ -1194,24 +1226,22 @@ async def _run(handle):
     def _persist() -> None:
         session_store.save(session_id, history, cwd, selected_model or "")
 
-    prior = session_store.latest()
-    if prior and prior.get("turns"):
-        console.print(
-            f"[dim]↳ last session [bold]{prior['id']}[/] has {prior['turns']} turn(s) — "
-            "/resume to restore it, or /resume list[/]"
-        )
+    def _show_welcome() -> None:
+        console.print(_header(
+            r0["cheap"], r0["smart"],
+            session_id=session_id, cwd=cwd, model=selected_model,
+            storage=os.getenv("PAL_STORAGE", "memory"),
+            plan_only=_claude_plan_only(),
+            orch_present=_orchestrator_available(), orch_cli=_orchestrator_cli(),
+        ))
+
+    _show_welcome()
     _sm = _smartest_models(3, need_tools=True)
     if _sm:
-        if not _orchestrator_available():
-            console.print(
-                f"[dim]no external orchestrator ('{_orchestrator_cli()}') found — /agent runs on the "
-                f"smartest engine models: {', '.join(_sm)}[/]"
-            )
-        elif _claude_plan_only():
-            console.print(
-                f"[dim]claude = planning only (saves tokens) — /agent:plan uses claude; all execution "
-                f"runs on engine models: {', '.join(_sm)}[/]"
-            )
+        _note(f"engine models: {', '.join(_sm)}", "route")
+    prior = session_store.latest()
+    if prior and prior.get("turns"):
+        _note(f"resume last session {prior['id']} ({prior['turns']} turns): /resume  ·  list: /resume list", "sys")
 
     session = None
     if _PT_OK and sys.stdin.isatty():
@@ -1234,7 +1264,7 @@ async def _run(handle):
             console.print("[dim]bye[/]")
             return 0
         if low in ("/help", "/h", "?"):
-            console.print(_header(r0["cheap"], r0["smart"]))
+            _show_welcome()
             continue
         if low in ("/clear", "/reset", "/new"):
             history.clear()
@@ -1442,21 +1472,11 @@ async def _run(handle):
                 console.print("[red]no model available — check `pal diag`[/]")
                 continue
             if full and not tools_full_warned:
-                console.print(
-                    Panel(
-                        Text.assemble(
-                            ("⚠ /tools runs ANY shell command on this box by default", "bold yellow"),
-                            (" (nmap, nuclei, sqlmap, rm, …).\n", "yellow"),
-                            (f"Only use on systems you are authorized to test. cwd: {cwd}\n", "yellow"),
-                            ("Use /tools:ro for a read-only session.", "dim"),
-                        ),
-                        border_style="red",
-                        padding=(0, 1),
-                    )
-                )
+                _note(f"/tools runs ANY shell command here — authorized systems only · /tools:ro for read-only. cwd: {cwd}",
+                      "warn")
                 tools_full_warned = True
-            mode = "full: any command" if full else "read-only: bash·read_file·write_file·web_fetch·gh"
-            console.print(f"[dim]→ pool: {', '.join(pool)} ({mode})[/]")
+            mode = "full: any command" if full else "read-only"
+            _note(f"pool: {', '.join(pool)} ({mode})", "route")
             with console.status(f"[dim]{tmodel} using tools{'' if full else ' (read-only)'}…[/]", spinner="dots"):
                 ans, transcript, used_model = await _tools_loop_pool(
                     task, pool, cwd, max_steps=8 if full else 5, full=full
@@ -1657,7 +1677,7 @@ async def _run(handle):
             if not model:
                 console.print("[red]no model available — `pal diag`[/]")
                 continue
-            console.print(f"[dim]→ {model} (chat)[/]")
+            _note(f"{model} (chat)", "route")
             with console.status(f"[dim]{model} thinking…[/]", spinner="dots"):
                 ans = await _ask_chat(
                     model, line, history,
@@ -1685,20 +1705,10 @@ async def _run(handle):
             console.print("[red]no model available — check `pal diag`[/]")
             continue
         if not tools_full_warned:
-            console.print(
-                Panel(
-                    Text.assemble(
-                        ("⚠ every message now runs with FULL tools on this box", "bold yellow"),
-                        (" (any shell command — nmap, rm, …).\n", "yellow"),
-                        ("Use /ask <q> for plain chat · /model to pick a model · only on authorized systems.\n", "dim"),
-                        (f"cwd: {cwd}", "dim"),
-                    ),
-                    border_style="red",
-                    padding=(0, 1),
-                )
-            )
+            _note(f"every message runs with FULL tools here (any shell command) — /ask for plain chat. cwd: {cwd}",
+                  "warn")
             tools_full_warned = True
-        console.print(f"[dim]→ {pool[0]} · tools (full)[/]")
+        _note(f"{pool[0]} · tools (full)", "route")
         preamble = _ctx_render(history)
         with console.status(f"[dim]{pool[0]} using tools…[/]", spinner="dots"):
             ans, transcript, used = await _tools_loop_pool(
