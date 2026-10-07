@@ -210,6 +210,41 @@ async def test_ask_chat_error_is_sentinel(monkeypatch):
     assert "provider down" in ans
 
 
+# ----- Claude-Code-style interaction layer -----------------------------------
+def test_repl_state_cycles_permission_modes(monkeypatch):
+    monkeypatch.delenv("PAL_CHAT_PERM", raising=False)
+    s = chat_repl._ReplState(model="m", cwd="/tmp")
+    assert s.perm == "auto"
+    s.cycle_perm()
+    assert s.perm == "ask"
+    s.cycle_perm()
+    assert s.perm == "read-only"
+    s.cycle_perm()
+    assert s.perm == "auto"            # wraps
+
+
+def test_repl_state_honors_env_default(monkeypatch):
+    monkeypatch.setenv("PAL_CHAT_PERM", "read-only")
+    assert chat_repl._ReplState(None, "/tmp").perm == "read-only"
+    monkeypatch.setenv("PAL_CHAT_PERM", "bogus")
+    assert chat_repl._ReplState(None, "/tmp").perm == "auto"  # invalid -> auto
+
+
+def test_slash_completer_matches_prefix():
+    from prompt_toolkit.document import Document
+
+    comp = chat_repl._SlashCompleter()
+    assert [c.text for c in comp.get_completions(Document("/re"), None)] == ["/resume"]
+    # once there's a space (args), stop completing
+    assert list(comp.get_completions(Document("/resume "), None)) == []
+    # non-slash text yields nothing
+    assert list(comp.get_completions(Document("hello"), None)) == []
+
+
+def test_think_verb_is_from_the_set():
+    assert chat_repl._think() in chat_repl._THINK_VERBS
+
+
 # ----- orchestrator fallback onto smartest models ----------------------------
 def test_orchestrator_available_env_force_none(monkeypatch):
     monkeypatch.setenv("PAL_ORCHESTRATOR", "none")

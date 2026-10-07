@@ -36,7 +36,9 @@ from rich.text import Text
 
 try:
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.enums import EditingMode
+    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -47,6 +49,72 @@ except ImportError:  # pragma: no cover - degrade to plain input if not installe
     _PT_OK = False
 
 console = Console()
+
+# ---- Claude-Code-style interaction layer -----------------------------------
+# Permission modes cycled with Shift+Tab (shown in the bottom toolbar):
+#   auto       every message runs with full tools (no prompt)
+#   ask        confirm once before a message runs with full tools
+#   read-only  messages run with the read-only tool allowlist only (no mutation)
+_PERM_MODES = ("auto", "ask", "read-only")
+_PERM_LABEL = {"auto": "full-auto", "ask": "ask first", "read-only": "read-only"}
+_THINK_VERBS = ("Thinking", "Routing", "Herding", "Puzzling", "Scheming",
+                "Conjuring", "Divining", "Pondering", "Computing", "Sleuthing")
+
+
+def _think() -> str:
+    import random
+
+    return random.choice(_THINK_VERBS)
+
+
+class _ReplState:
+    """Shared mutable UI state the prompt session, bottom toolbar and the main
+    loop all read (perm mode, current model, cwd)."""
+
+    def __init__(self, model: str | None, cwd: str):
+        perm = (os.getenv("PAL_CHAT_PERM", "auto") or "auto").strip().lower()
+        self.perm = perm if perm in _PERM_MODES else "auto"
+        self.model = model
+        self.cwd = cwd
+
+    def cycle_perm(self) -> None:
+        self.perm = _PERM_MODES[(_PERM_MODES.index(self.perm) + 1) % len(_PERM_MODES)]
+
+
+_SLASH_CMDS = (
+    "/help", "/status", "/context", "/history", "/compact", "/clear", "/resume",
+    "/model", "/models", "/ask", "/cheap", "/smart", "/agent", "/agent:edit",
+    "/agent:plan", "/agent:review", "/delegate", "/debate", "/tools", "/tools:ro",
+    "/plan", "/mission", "/exit",
+)
+
+if _PT_OK:
+
+    class _SlashCompleter(Completer):
+        """Autocomplete slash-commands when the line begins with '/'."""
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/") or " " in text:
+                return
+            for cmd in _SLASH_CMDS:
+                if cmd.startswith(text):
+                    yield Completion(cmd, start_position=-len(text), display=cmd)
+
+
+def _render_tools(transcript) -> None:
+    """Claude-Code-style tool trace: ⏺ Tool(args) then an indented ⎿ result."""
+    for name, args, res in transcript:
+        shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args, default=str)
+        console.print(Text.assemble(("⏺ ", "bold cyan"),
+                                     (name, "bold"), ("(", "dim"), (str(shown)[:100], "cyan"), (")", "dim")))
+        first = (str(res).strip().splitlines() or [""])[0]
+        extra = max(0, len(str(res).strip().splitlines()) - 1)
+        tail = f"  (+{extra} more line{'s' if extra != 1 else ''})" if extra else ""
+        glyph = "✗" if str(res).lower().startswith("error") else "⎿"
+        gstyle = "red" if glyph == "✗" else "dim"
+        console.print(Text.assemble((f"  {glyph} ", gstyle), (first[:160], "dim"), (tail, "dim")))
+
 
 # one specific role (system instruction) per command, so each behaves for its job
 _ROLES = {
@@ -848,16 +916,15 @@ async def _debate_gate(task: str, answer: str) -> str | None:
         return f"(debate gate unavailable: {type(exc).__name__})"
 
 
-def _build_prompt_session(session_id: str) -> PromptSession:
+def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> PromptSession:
     """Claude-Code-like input: multiline buffer, Up/Down do visual-line nav
     within the draft and only fall through to history at the first/last
     line (prompt_toolkit's Buffer.auto_up/auto_down -- built in, not
     reimplemented here), Ctrl-P/Ctrl-N are unconditional history-prev/next
     the way readline's emacs mode does it, and the in-progress draft is
-    preserved exactly: prompt_toolkit's Buffer keeps the not-yet-submitted
-    line as a trailing "working line" in its history index, so paging back
-    out past the oldest recalled entry (or forward past the newest) restores
-    it byte-for-byte rather than clearing it.
+    preserved exactly. Adds a Claude-Code-style bottom toolbar (permission
+    mode · model · cwd), Shift+Tab to cycle the permission mode, slash-command
+    autocomplete, and a placeholder hint.
     """
     kb = KeyBindings()
 
@@ -881,12 +948,36 @@ def _build_prompt_session(session_id: str) -> PromptSession:
     def _hist_next(event):
         event.current_buffer.history_forward()
 
+    if state is not None:
+        @kb.add("s-tab")       # Shift+Tab cycles the permission mode
+        @kb.add("escape", "[", "Z")  # raw backtab for terminals that send it literally
+        def _cycle_perm(event):
+            state.cycle_perm()
+            event.app.invalidate()
+
+    def _toolbar():
+        if state is None:
+            return None
+        home = os.path.expanduser("~")
+        cwd = state.cwd.replace(home, "~", 1) if state.cwd.startswith(home) else state.cwd
+        arrows = "⏵⏵" if state.perm == "auto" else "⏵"
+        return HTML(
+            f" <b>{arrows} {_PERM_LABEL[state.perm]}</b> "
+            f"<style fg='#888888'>(shift+tab to cycle)</style>  "
+            f"<style fg='#888888'>·</style>  {state.model or 'auto'}  "
+            f"<style fg='#888888'>·</style>  <style fg='#888888'>{cwd}</style>"
+        )
+
     return PromptSession(
         history=chat_history.JsonlSessionHistory(session_id),
         multiline=True,
         key_bindings=kb,
         editing_mode=EditingMode.EMACS,
         enable_history_search=False,  # keep plain Up/Down/Ctrl-P/Ctrl-N semantics
+        completer=_SlashCompleter() if _PT_OK else None,
+        complete_while_typing=True,
+        bottom_toolbar=_toolbar,
+        placeholder=HTML("<style fg='#666666'>Type a message, / for commands, Shift+Tab for mode…</style>"),
     )
 
 
@@ -1319,6 +1410,7 @@ async def _run(handle):
     # One durable id per launch so the self-contained context (history) persists
     # to ~/.pal/sessions.db and /resume can bring it back after a restart.
     session_id = _new_session_id()
+    state = _ReplState(selected_model, cwd)
 
     def _persist() -> None:
         session_store.save(session_id, history, cwd, selected_model or "")
@@ -1345,7 +1437,7 @@ async def _run(handle):
     session = None
     if _PT_OK and sys.stdin.isatty():
         try:
-            session = _build_prompt_session(session_id)
+            session = _build_prompt_session(session_id, state)
         except Exception:
             session = None  # e.g. no real TTY -- fall back to plain input
 
@@ -1440,6 +1532,7 @@ async def _run(handle):
             continue
         if low in ("/model", "/pick"):
             selected_model = await _pick_model_menu(session, cwd, selected_model)
+            state.model = selected_model
             continue
         if low == "/models":
             with console.status("[dim]building model catalog…[/]", spinner="dots"):
@@ -1524,9 +1617,7 @@ async def _run(handle):
                         full=full_edit, history_preamble=_ctx_render(history),
                         system_preamble=_ORCHESTRATOR_SYS,
                     )
-                for name, args, _res in transcript:
-                    shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
-                    console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+                _render_tools(transcript)
                 console.print(_bubble(f"{used} · self-orchestrator", ans, role="agent", color="magenta"))
                 _ctx_append(history, "user", line)
                 _ctx_append(history, "assistant", ans)
@@ -1604,9 +1695,7 @@ async def _run(handle):
                     digest, transcript, reader = await _tools_loop_pool(
                         gather, reader_pool, cwd, max_steps=6, full=False
                     )
-                for name, args, _res in transcript:
-                    shown = args.get("command") or args.get("path") or ""
-                    console.print(f"[dim]  read · {name}: {str(shown)[:60]}[/]")
+                _render_tools(transcript)
             else:
                 console.print("[dim](no tool-capable reader available; debating without file context)[/]")
             # Headroom: the digest gets re-sent verbatim to every panel member below;
@@ -1793,19 +1882,28 @@ async def _run(handle):
         if not pool or not pool[0]:
             console.print("[red]no model available — check `pal diag`[/]")
             continue
-        if not tools_full_warned:
+        # Permission mode (Shift+Tab cycles it): auto runs full; read-only uses
+        # the non-mutating allowlist; ask confirms once before full tools.
+        full = state.perm != "read-only"
+        if state.perm == "ask":
+            try:
+                ok = await asyncio.to_thread(console.input, "[yellow]⏵ run with full tools on this box? [y/N][/] ")
+            except (EOFError, KeyboardInterrupt):
+                ok = ""
+            if ok.strip().lower() not in ("y", "yes"):
+                full = False
+                _note("running read-only (not approved for full tools)", "sys")
+        if full and not tools_full_warned:
             _note(f"every message runs with FULL tools here (any shell command) — /ask for plain chat. cwd: {cwd}",
                   "warn")
             tools_full_warned = True
-        _note(f"{pool[0]} · tools (full)", "route")
+        _note(f"{pool[0]} · tools ({'full' if full else 'read-only'})", "route")
         preamble = _ctx_render(history)
-        with console.status(f"[dim]{pool[0]} using tools…[/]", spinner="dots"):
+        with console.status(f"[dim]{_think()}… ({pool[0]})[/]", spinner="dots"):
             ans, transcript, used = await _tools_loop_pool(
-                line, pool, cwd, max_steps=8, full=True, history_preamble=preamble
+                line, pool, cwd, max_steps=8 if full else 5, full=full, history_preamble=preamble
             )
-        for name, args, _res in transcript:
-            shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
-            console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+        _render_tools(transcript)
         console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
         _ctx_append(history, "user", line)
         _ctx_append(history, "assistant", ans)
