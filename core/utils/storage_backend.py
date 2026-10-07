@@ -98,17 +98,102 @@ class InMemoryStorage:
             self._cleanup_thread.join(timeout=1)
 
 
+class SqliteStorage:
+    """Durable, process-shared SQLite backend with the same API as
+    InMemoryStorage (set_with_ttl / get / setex), so it is a drop-in.
+
+    Unlike the in-memory store this survives process restarts and is shared
+    across processes (one `~/.pal/sessions.db` file), which is what makes
+    `sauron chat` sessions resumable and lets `serve` + `chat` see the same
+    threads. Embedded and stdlib-only (no server, no new dependency); WAL mode
+    gives concurrent readers alongside a single writer. Expiry is lazy (on get)
+    plus an opportunistic sweep, mirroring the in-memory TTL semantics.
+    """
+
+    def __init__(self, db_path: Optional[str] = None):
+        import sqlite3
+        from pathlib import Path
+
+        path = db_path or get_env("PAL_STORAGE_DB", "") or str(Path.home() / ".pal" / "sessions.db")
+        if path != ":memory:":
+            Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            path = str(Path(path).expanduser())
+        self._path = path
+        self._lock = threading.Lock()
+        # check_same_thread=False: the REPL drives calls from asyncio.to_thread
+        # worker threads; every access is serialized by self._lock anyway.
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS kv ("
+                "key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at REAL NOT NULL)"
+            )
+            self._conn.commit()
+        self._gets = 0
+        logger.info("SQLite conversation storage at %s", path)
+
+    def set_with_ttl(self, key: str, ttl_seconds: int, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO kv(key, value, expires_at) VALUES (?, ?, ?)",
+                (key, value, time.time() + ttl_seconds),
+            )
+            self._conn.commit()
+
+    def get(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT value, expires_at FROM kv WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            value, expires_at = row
+            if time.time() >= expires_at:
+                self._conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+                self._conn.commit()
+                return None
+            # opportunistic sweep so expired rows do not accumulate unbounded
+            self._gets += 1
+            if self._gets % 50 == 0:
+                self._conn.execute("DELETE FROM kv WHERE expires_at < ?", (time.time(),))
+                self._conn.commit()
+            return value
+
+    def setex(self, key: str, ttl_seconds: int, value: str) -> None:
+        self.set_with_ttl(key, ttl_seconds, value)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 # Global singleton instance
 _storage_instance = None
 _storage_lock = threading.Lock()
 
 
-def get_storage_backend() -> InMemoryStorage:
-    """Get the global storage instance (singleton pattern)"""
+def _make_storage():
+    """Pick the backend from PAL_STORAGE (default in-memory to preserve the
+    ephemeral MCP-server behavior and subprocess isolation the simulator tests
+    rely on). `sauron chat` opts into durability via PAL_STORAGE=sqlite."""
+    kind = (get_env("PAL_STORAGE", "memory") or "memory").strip().lower()
+    if kind in ("sqlite", "sqlite3", "disk", "persistent"):
+        try:
+            return SqliteStorage()
+        except Exception as exc:  # noqa: BLE001 - never let storage choice crash startup
+            logger.warning("SQLite storage unavailable (%s); falling back to in-memory", exc)
+    return InMemoryStorage()
+
+
+def get_storage_backend():
+    """Get the global storage instance (singleton pattern)."""
     global _storage_instance
     if _storage_instance is None:
         with _storage_lock:
             if _storage_instance is None:
-                _storage_instance = InMemoryStorage()
-                logger.info("Initialized in-memory conversation storage")
+                _storage_instance = _make_storage()
+                logger.info("Initialized conversation storage: %s", type(_storage_instance).__name__)
     return _storage_instance

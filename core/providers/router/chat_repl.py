@@ -510,6 +510,15 @@ _CTX_BUDGET = int(os.getenv("PAL_CHAT_CTX_CHARS", "6000"))
 _CTX_MAX_TURNS = int(os.getenv("PAL_CHAT_CTX_MAX_TURNS", "200"))
 
 
+def _new_session_id() -> str:
+    """Human-legible, unique id for one chat session (timestamp + short random),
+    used as the durable key in session_store so /resume can name it."""
+    import time
+    import uuid
+
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
+
+
 def _ctx_append(history: list[dict], role: str, content: str) -> None:
     """Record one turn (role 'user' | 'assistant'). Empty replies and error
     sentinels are dropped so a broken turn never pollutes later context; the
@@ -696,7 +705,7 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             style="dim",
         ),
         Text(
-            "context: /context (show) · /history (turns) · /compact (summarize) · /clear (reset)",
+            "context: /context · /history · /compact · /clear · /resume [id|list] (persists across restarts)",
             style="dim",
         ),
         Text(
@@ -986,11 +995,25 @@ async def _run(handle):
         console.print(f"[dim]pinned model (PAL_CHAT_MODEL): [bold]{selected_model}[/] — "
                       "use /plan <goal> to draft, /feed to run it through PAL[/]")
 
+    from providers.router import session_store
+
+    # One durable id per launch so the self-contained context (history) persists
+    # to ~/.pal/sessions.db and /resume can bring it back after a restart.
+    session_id = _new_session_id()
+
+    def _persist() -> None:
+        session_store.save(session_id, history, cwd, selected_model or "")
+
+    prior = session_store.latest()
+    if prior and prior.get("turns"):
+        console.print(
+            f"[dim]↳ last session [bold]{prior['id']}[/] has {prior['turns']} turn(s) — "
+            "/resume to restore it, or /resume list[/]"
+        )
+
     session = None
-    session_id = "repl"
     if _PT_OK and sys.stdin.isatty():
         try:
-            session_id = chat_history.new_session_id()
             session = _build_prompt_session(session_id)
         except Exception:
             session = None  # e.g. no real TTY -- fall back to plain input
@@ -1013,7 +1036,38 @@ async def _run(handle):
             continue
         if low in ("/clear", "/reset", "/new"):
             history.clear()
-            console.print("[dim]context cleared — starting fresh[/]")
+            # start a NEW durable session so the prior one stays on disk
+            session_id = _new_session_id()
+            console.print(f"[dim]context cleared — new session {session_id}[/]")
+            continue
+        if low.startswith("/resume"):
+            arg = line[len("/resume"):].strip()
+            if arg in ("list", "ls"):
+                rows = session_store.recent(10)
+                if not rows:
+                    console.print("[dim]no saved sessions[/]")
+                else:
+                    import time as _t
+                    body = "\n".join(
+                        f"[bold]{r['id']}[/]  {r['turns']} turn(s)  "
+                        f"[dim]{_t.strftime('%Y-%m-%d %H:%M', _t.localtime(r['updated_at'] or 0))}"
+                        f"  {r['cwd'] or ''}[/]"
+                        for r in rows
+                    )
+                    console.print(Panel(body, title="saved sessions", title_align="left",
+                                        border_style="cyan", padding=(0, 1)))
+                continue
+            target = arg or (session_store.latest() or {}).get("id", "")
+            if not target:
+                console.print("[dim]no session to resume[/]")
+                continue
+            restored = session_store.load(target)
+            if restored is None:
+                console.print(f"[red]no saved session '{target}'[/] [dim](/resume list)[/]")
+                continue
+            history[:] = restored
+            session_id = target  # keep writing back to the resumed session
+            console.print(f"[dim]resumed session [bold]{target}[/] — {len(history)} turn(s) restored[/]")
             continue
         if low in ("/context", "/ctx"):
             chars = sum(len(t.get("content") or "") for t in history)
@@ -1078,6 +1132,7 @@ async def _run(handle):
             console.print(_bubble(model, ans, color="blue"))
             _ctx_append(history, "user", q)
             _ctx_append(history, "assistant", ans)
+            _persist()
             last_answer = ans
             continue
 
@@ -1367,6 +1422,7 @@ async def _run(handle):
             console.print(_bubble(model, ans))
             _ctx_append(history, "user", line)
             _ctx_append(history, "assistant", ans)
+            _persist()
             last_answer = ans
             continue
 
@@ -1410,6 +1466,7 @@ async def _run(handle):
         console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
         _ctx_append(history, "user", line)
         _ctx_append(history, "assistant", ans)
+        _persist()
         last_answer = ans
 
 
