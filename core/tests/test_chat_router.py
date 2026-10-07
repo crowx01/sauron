@@ -245,6 +245,14 @@ def test_think_verb_is_from_the_set():
     assert chat_repl._think() in chat_repl._THINK_VERBS
 
 
+def test_stream_on_requires_tty_session_and_env(monkeypatch):
+    monkeypatch.delenv("PAL_CHAT_STREAM", raising=False)
+    assert chat_repl._stream_on(object()) is True       # a session present -> on
+    assert chat_repl._stream_on(None) is False          # no TTY session -> off
+    monkeypatch.setenv("PAL_CHAT_STREAM", "0")
+    assert chat_repl._stream_on(object()) is False      # explicitly disabled
+
+
 # ----- orchestrator fallback onto smartest models ----------------------------
 def test_orchestrator_available_env_force_none(monkeypatch):
     monkeypatch.setenv("PAL_ORCHESTRATOR", "none")

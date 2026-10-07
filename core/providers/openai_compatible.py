@@ -772,6 +772,62 @@ class OpenAICompatibleProvider(ModelProvider):
         response_cache.put(cache_key, resp)
         return resp
 
+    def generate_content_stream(
+        self,
+        prompt: str,
+        model_name: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.3,
+        max_output_tokens: Optional[int] = None,
+        **kwargs,
+    ):
+        """Yield text deltas for a plain-text chat completion (live streaming).
+
+        Applies the same outbound masking as generate_content (credentials/PII
+        are redacted before the request leaves). Text-only: it does not handle
+        images or the Responses API, and raises for models that require the
+        Responses endpoint so the caller can fall back to non-streaming. This is
+        used by the REPL's plain-chat path; the MCP tool path stays unary.
+        """
+        if not self.validate_model_name(model_name):
+            raise ValueError(f"Model '{model_name}' not in allowed models list.")
+        try:
+            capabilities = self.get_capabilities(model_name)
+        except Exception:  # noqa: BLE001
+            capabilities = None
+        if capabilities is not None and getattr(capabilities, "use_openai_response_api", False):
+            raise NotImplementedError("streaming not supported for Responses-API models")
+
+        effective_temperature = (
+            capabilities.get_effective_temperature(temperature) if capabilities else temperature
+        )
+        resolved_model = self._resolve_model_name(model_name)
+
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        from providers.router import outbound, self_heal
+
+        messages, _mask_ctx = outbound.prepare(messages, model_name)
+        resolved_model = self_heal.resolve(resolved_model)
+
+        params: dict = {"model": resolved_model, "messages": messages, "stream": True}
+        if effective_temperature is not None:
+            params["temperature"] = effective_temperature
+            if max_output_tokens:
+                params["max_tokens"] = max_output_tokens
+
+        stream = self.client.chat.completions.create(**params)
+        for chunk in stream:
+            try:
+                piece = chunk.choices[0].delta.content
+            except (AttributeError, IndexError, TypeError):
+                piece = None
+            if piece:
+                yield piece
+
     def validate_parameters(self, model_name: str, temperature: float, **kwargs) -> None:
         """Validate model parameters.
 

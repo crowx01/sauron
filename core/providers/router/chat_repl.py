@@ -855,6 +855,42 @@ async def _ask_chat(model: str, prompt: str, history: list[dict], role: str | No
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
+def _stream_on(session) -> bool:
+    """Live streaming only on a real interactive session (never for piped /
+    non-TTY callers) and unless disabled with PAL_CHAT_STREAM=0."""
+    return session is not None and os.getenv("PAL_CHAT_STREAM", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+async def _stream_chat(model: str, prompt: str, history: list[dict], role: str | None = None) -> str:
+    """Self-contained plain-chat call rendered LIVE: deltas print to the
+    terminal as the model emits them (Claude-Code-style), then the full cleaned
+    answer is returned. Outbound masking still applies in the provider. Falls
+    back to a one-shot print inside dispatch when the provider can't stream."""
+    from providers.router import dispatch
+
+    system = _ROLES.get(role or "chat", _ROLES["chat"])
+    preamble = _ctx_render(history)
+    full_prompt = f"{preamble}{prompt}" if preamble else prompt
+
+    console.print(Text.assemble((f"{_GLYPH['pal']} ", "bold green"), (model, "bold green"), ("  streaming…", "dim")))
+    buf: list[str] = []
+
+    def _on_delta(piece: str) -> None:
+        buf.append(piece)
+        console.print(piece, end="", highlight=False, soft_wrap=True)
+
+    try:
+        text = await asyncio.to_thread(
+            dispatch.generate_stream, model, full_prompt, system,
+            temperature=0.3, category="chat", tool="chat", on_delta=_on_delta,
+        )
+        console.print()  # close the streamed line
+        return _clean(text or "".join(buf))
+    except Exception as exc:  # noqa: BLE001
+        console.print()
+        return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
+
+
 # ---- auto-debate gate for huge / high-stakes tasks -------------------------
 # A "huge" task (long, multi-step, security, or one the tool loop spent many
 # steps on) is validated through the executor->reviewer->judge debate pipeline
@@ -1553,9 +1589,14 @@ async def _run(handle):
                 console.print("[dim]usage: /delegate <model> <question>[/]")
                 continue
             model, q = rest[0], rest[1]
-            with console.status(f"[dim]{model} (delegated) thinking…[/]", spinner="dots"):
-                ans = await _ask_chat(model, q, history, role="delegate")
-            console.print(_bubble(model, ans, color="blue"))
+            if _stream_on(session):
+                ans = await _stream_chat(model, q, history, role="delegate")
+                if ans.startswith("__ERROR__"):
+                    console.print(_bubble(model, ans, color="blue"))
+            else:
+                with console.status(f"[dim]{_think()}… ({model})[/]", spinner="dots"):
+                    ans = await _ask_chat(model, q, history, role="delegate")
+                console.print(_bubble(model, ans, color="blue"))
             _ctx_append(history, "user", q)
             _ctx_append(history, "assistant", ans)
             _persist()
@@ -1856,12 +1897,15 @@ async def _run(handle):
                 console.print("[red]no model available — `pal diag`[/]")
                 continue
             _note(f"{model} (chat)", "route")
-            with console.status(f"[dim]{model} thinking…[/]", spinner="dots"):
-                ans = await _ask_chat(
-                    model, line, history,
-                    role=(forced if forced in ("cheap", "smart") else None),
-                )
-            console.print(_bubble(model, ans))
+            _role = forced if forced in ("cheap", "smart") else None
+            if _stream_on(session):
+                ans = await _stream_chat(model, line, history, role=_role)
+                if ans.startswith("__ERROR__"):
+                    console.print(_bubble(model, ans))
+            else:
+                with console.status(f"[dim]{_think()}… ({model})[/]", spinner="dots"):
+                    ans = await _ask_chat(model, line, history, role=_role)
+                console.print(_bubble(model, ans))
             _ctx_append(history, "user", line)
             _ctx_append(history, "assistant", ans)
             _persist()
