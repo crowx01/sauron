@@ -113,3 +113,122 @@ def test_extract_files_required_envelope_humanized():
     assert "wanted to see files" in ans
     assert "recon.js" in ans
     assert "files_required_to_continue" not in ans  # raw JSON not shown
+
+
+# ----- self-contained conversation context (Phase 3) -------------------------
+def test_ctx_append_skips_empty_and_errors():
+    h: list[dict] = []
+    chat_repl._ctx_append(h, "user", "  hello  ")
+    chat_repl._ctx_append(h, "assistant", "")          # empty -> dropped
+    chat_repl._ctx_append(h, "assistant", "   ")       # whitespace -> dropped
+    chat_repl._ctx_append(h, "assistant", "__ERROR__boom")  # error sentinel -> dropped
+    assert h == [{"role": "user", "content": "hello"}]
+
+
+def test_ctx_append_caps_total_turns(monkeypatch):
+    monkeypatch.setattr(chat_repl, "_CTX_MAX_TURNS", 3)
+    h: list[dict] = []
+    for i in range(6):
+        chat_repl._ctx_append(h, "user", f"m{i}")
+    assert [t["content"] for t in h] == ["m3", "m4", "m5"]  # oldest discarded
+
+
+def test_ctx_render_empty_is_blank():
+    assert chat_repl._ctx_render([]) == ""
+
+
+def test_ctx_render_wraps_and_labels_turns():
+    h = [
+        {"role": "user", "content": "scan example.com"},
+        {"role": "assistant", "content": "found an open port 8080"},
+    ]
+    out = chat_repl._ctx_render(h, budget=10_000)
+    assert "Conversation so far" in out
+    assert "[Current message]" in out
+    assert "You: scan example.com" in out
+    assert "Sauron: found an open port 8080" in out
+
+
+def test_ctx_render_trims_oldest_first_and_keeps_newest():
+    h = [
+        {"role": "user", "content": "OLD-" + "x" * 200},
+        {"role": "assistant", "content": "MID-" + "y" * 200},
+        {"role": "user", "content": "NEWEST question"},
+    ]
+    out = chat_repl._ctx_render(h, budget=60)
+    assert "NEWEST question" in out          # newest is always kept
+    assert "OLD-" not in out                  # oldest dropped under tight budget
+    assert "earlier turns omitted" in out     # visible marker left behind
+
+
+def test_ctx_compact_noop_when_too_short():
+    h = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    before = list(h)
+    folded, err = chat_repl._ctx_compact(h)
+    assert folded == 0 and err is None
+    assert h == before  # untouched
+
+
+class _Resp:
+    def __init__(self, content):
+        self.content = content
+
+
+async def test_ask_chat_prepends_context_and_uses_dispatch(monkeypatch):
+    from providers.router import dispatch
+
+    seen = {}
+
+    def _fake_generate(model, prompt, system=None, **kw):
+        seen["model"] = model
+        seen["prompt"] = prompt
+        seen["system"] = system
+        return _Resp("the answer")
+
+    monkeypatch.setattr(dispatch, "generate", _fake_generate)
+    history = [
+        {"role": "user", "content": "earlier ask"},
+        {"role": "assistant", "content": "earlier reply"},
+    ]
+    ans = await chat_repl._ask_chat("gpt-oss-20b", "new question", history, role="smart")
+    assert ans == "the answer"
+    assert seen["model"] == "gpt-oss-20b"
+    assert "earlier ask" in seen["prompt"]        # prior context threaded in
+    assert "new question" in seen["prompt"]
+    assert seen["system"] == chat_repl._ROLES["smart"]
+
+
+async def test_ask_chat_error_is_sentinel(monkeypatch):
+    from providers.router import dispatch
+
+    def _boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(dispatch, "generate", _boom)
+    ans = await chat_repl._ask_chat("m", "q", [], role=None)
+    assert ans.startswith("__ERROR__")
+    assert "provider down" in ans
+
+
+def test_ctx_compact_folds_old_turns(monkeypatch):
+    from providers.router import chat_router as _cr
+    from providers.router import dispatch
+
+    monkeypatch.setattr(dispatch, "generate", lambda *a, **k: _Resp("BRIEF: target=example.com, port 8080 open"))
+    monkeypatch.setattr(_cr, "route", lambda *a, **k: {"cheap": "gpt-oss-20b"})
+    h = [
+        {"role": "user", "content": "turn1"},
+        {"role": "assistant", "content": "ans1"},
+        {"role": "user", "content": "turn2"},
+        {"role": "assistant", "content": "ans2"},
+        {"role": "user", "content": "recent-q"},
+        {"role": "assistant", "content": "recent-a"},
+    ]
+    folded, err = chat_repl._ctx_compact(h, keep_recent=2)
+    assert err is None and folded == 4
+    assert h[0]["content"].startswith("[Earlier conversation summary]")
+    assert "example.com" in h[0]["content"]       # evidence preserved
+    assert h[-2:] == [
+        {"role": "user", "content": "recent-q"},
+        {"role": "assistant", "content": "recent-a"},
+    ]

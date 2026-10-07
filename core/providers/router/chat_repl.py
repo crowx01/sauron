@@ -1,16 +1,21 @@
 """Interactive `pal chat` REPL with a rich terminal UI.
 
-A conversational front-end that reuses PAL's own machinery -- every model call
-goes through ``server.handle_call_tool`` (the same dispatcher the MCP server
-uses), so classifier routing, bandit reordering, refusal-memory and episode
-logging all apply. This file adds no model-calling logic of its own.
+A self-contained conversational front-end: chat and the tool loop go straight
+through ``providers.router.dispatch`` (classifier routing, bandit reordering,
+size-guard reroute, fallback chains, refusal-memory, episode logging and
+credential/PII masking all apply underneath), so the REPL needs no running MCP
+server and no server-side continuation-thread store. Conversation context is
+owned by the REPL itself (see the `_ctx_*` helpers), making follow-up messages
+remember prior turns without any external state. The one exception is
+``/agent``, which intentionally bridges out to the local ``claude`` CLI.
 
 Behaviour:
-  * plain message  -> chat_router picks cheap (e.g. "hi") or smart (hard stuff)
+  * plain message  -> runs with full local tools, with rolling context
+  * /ask | /cheap | /smart <q> -> plain chat (no tools) for one message
   * /debate <q>    -> asks a small panel and prints each view
   * /delegate <m> <q> -> force model m for one question
-  * /smart <q> | /cheap <q> -> force a tier for one question
-  * /model, /help, /exit
+  * /clear, /context, /history, /compact -> manage the session's context
+  * /model, /models, /help, /exit
 """
 
 from __future__ import annotations
@@ -149,19 +154,6 @@ def _extract(result) -> tuple[str, str | None]:
     return (_clean("\n".join(p for p in parts if p).strip()), cont)
 
 
-async def _ask(handle, prompt: str, model: str, cwd: str, cont: str | None, role: str | None = None):
-    if role:  # prepend the command's specific role so the model behaves for its job
-        prompt = f"[Role: {_ROLES.get(role, '')}]\n\n{prompt}"
-    args = {"prompt": prompt, "model": model, "working_directory_absolute_path": cwd}
-    if cont:
-        args["continuation_id"] = cont
-    try:
-        result = await handle("chat", args)
-        return _extract(result)
-    except Exception as exc:
-        return (f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}", cont)
-
-
 async def _ask_direct(model: str, prompt: str, system: str = ""):
     """Call the provider directly (no chat tool), so no workflow 'files_required'
     envelope and no response-blocking. Used for the debate verdict phase.
@@ -286,12 +278,16 @@ _TOOLS_SYS_FULL = (
 )
 
 
-async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, full: bool = False):
+async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, full: bool = False,
+                      history_preamble: str = ""):
     """ReAct loop calling the provider directly (not the chat tool, which blocks
     tool-shaped output): the model emits <tool_call>, PAL runs it locally on
     Kali, feeds back <tool_result>, until the model answers with no tool call.
 
     full=True unlocks arbitrary bash (real Kali tools) for this run only.
+    ``history_preamble`` (the REPL's rolling conversation context) is prepended
+    to the model's working buffer only -- scope/intent/system are still derived
+    from the raw ``task`` so prior turns can never widen the authorization scope.
     Returns (final_answer, transcript) where transcript is [(tool, args, result)].
     """
     from providers.registry import ModelProviderRegistry
@@ -340,7 +336,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
         _scope_tok = _authz.push_scope(_intent.scope_for_request(task, cwd))
     except Exception:
         _scope_tok = None
-    convo = task
+    convo = f"{history_preamble}{task}" if history_preamble else task
     transcript: list[tuple[str, dict, str]] = []
     last = ""
     seen_calls: set[str] = set()  # (name,args) signatures already run this loop
@@ -461,7 +457,8 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 pass
 
 
-async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False):
+async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False,
+                           history_preamble: str = ""):
     """Phase 6: try each model in ``pool`` in order until one returns a clean
     (non-error, non-refusal) answer -- fallover across the whole tool-capable
     model pool, not just retries within one provider (fallback_chain still
@@ -475,7 +472,9 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     last_ans, last_transcript = "__ERROR__no tool-capable model available", []
     last_model = pool[0] if pool else None
     for model in pool or []:
-        ans, transcript = await _tools_loop(task, model, cwd, max_steps=max_steps, full=full)
+        ans, transcript = await _tools_loop(
+            task, model, cwd, max_steps=max_steps, full=full, history_preamble=history_preamble
+        )
         last_ans, last_transcript, last_model = ans, transcript, model
         if ans.startswith("__ERROR__"):
             continue
@@ -494,6 +493,110 @@ def _bubble(model: str, answer: str, *, role: str = "pal", color: str = "green")
         body = Markdown(answer)
     title = Text.assemble((role, f"bold {color}"), (f"  ·  {model}", "dim"))
     return Panel(body, title=title, title_align="left", border_style=color, padding=(0, 1))
+
+
+# ---- self-contained in-session conversation context (Phase 3) --------------
+# The REPL owns its own conversation memory: a compact rolling transcript that
+# every chat/tools call sees. This keeps sauron a persistent working partner
+# AND keeps the engine self-contained -- chat goes straight through
+# providers.router.dispatch (no MCP tool-dispatch envelope, no server-side
+# continuation-thread store). We keep only user asks + assistant FINAL answers,
+# never raw tool transcripts (huge, and may hold scan output or secrets);
+# credential/PII masking still runs on every dispatch call underneath. Bounded
+# by a char budget with deterministic oldest-first trimming; /compact folds the
+# old tail into one summary turn without dropping concrete findings.
+
+_CTX_BUDGET = int(os.getenv("PAL_CHAT_CTX_CHARS", "6000"))
+_CTX_MAX_TURNS = int(os.getenv("PAL_CHAT_CTX_MAX_TURNS", "200"))
+
+
+def _ctx_append(history: list[dict], role: str, content: str) -> None:
+    """Record one turn (role 'user' | 'assistant'). Empty replies and error
+    sentinels are dropped so a broken turn never pollutes later context; the
+    list is capped at _CTX_MAX_TURNS (oldest discarded)."""
+    text = (content or "").strip()
+    if not text or text.startswith("__ERROR__"):
+        return
+    history.append({"role": role, "content": text})
+    if len(history) > _CTX_MAX_TURNS:
+        del history[: len(history) - _CTX_MAX_TURNS]
+
+
+def _ctx_render(history: list[dict], budget: int = _CTX_BUDGET) -> str:
+    """Render recent turns as a preamble for the next model call. The newest
+    turn is always kept; older turns are dropped oldest-first once ``budget``
+    chars are used, replaced by a visible marker. Returns '' when empty."""
+    if not history:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for turn in reversed(history):
+        who = "You" if turn.get("role") == "user" else "Sauron"
+        line = f"{who}: {(turn.get('content') or '').strip()}"
+        if kept and used + len(line) > budget:
+            kept.append("…[earlier turns omitted — /history or /compact]…")
+            break
+        kept.append(line)
+        used += len(line)
+    kept.reverse()
+    body = "\n\n".join(kept)
+    return (
+        "[Conversation so far — context only, do NOT re-answer these earlier turns]\n"
+        f"{body}\n\n[Current message]\n"
+    )
+
+
+def _ctx_compact(history: list[dict], keep_recent: int = 2) -> tuple[int, str | None]:
+    """Fold all but the last ``keep_recent`` turns into one summary turn via a
+    cheap dispatch call. Returns (turns_folded, error). Best-effort: on any
+    failure the history is left untouched. The summary prompt explicitly
+    preserves concrete decisions/targets/findings/paths/commands so compaction
+    never silently drops security evidence."""
+    if len(history) <= keep_recent + 1:
+        return (0, None)
+    from providers.router import chat_router, dispatch
+
+    old, recent = history[: -keep_recent or None], history[-keep_recent:] if keep_recent else []
+    transcript = "\n\n".join(
+        f"{'You' if t['role'] == 'user' else 'Sauron'}: {t['content']}" for t in old
+    )
+    model = chat_router.route("summarize", _is_available).get("cheap")
+    if not model:
+        return (0, "no model available")
+    sys_p = (
+        "Summarize the conversation into a dense factual brief that lets the assistant "
+        "continue seamlessly. PRESERVE every concrete decision, target, finding, file "
+        "path, command, credential-free fact, and open task; drop only chit-chat and "
+        "filler. No preamble — output the brief only."
+    )
+    try:
+        resp = dispatch.generate(model, transcript, sys_p, temperature=0.1, category="chat", tool="compact")
+        summary = _clean(getattr(resp, "content", "") or "")
+    except Exception as exc:  # noqa: BLE001 - best-effort; keep history intact
+        return (0, f"{type(exc).__name__}: {str(exc)[:160]}")
+    if not summary:
+        return (0, "empty summary")
+    history[:] = [{"role": "assistant", "content": f"[Earlier conversation summary]\n{summary}"}] + list(recent)
+    return (len(old), None)
+
+
+async def _ask_chat(model: str, prompt: str, history: list[dict], role: str | None = None) -> str:
+    """Self-contained plain-chat call: straight through providers.router.dispatch
+    (no MCP tool layer, no continuation store), with the REPL's own rolling
+    context prepended. Returns the cleaned answer (or an __ERROR__ sentinel)."""
+    from providers.router import dispatch
+
+    system = _ROLES.get(role or "chat", _ROLES["chat"])
+    preamble = _ctx_render(history)
+    full = f"{preamble}{prompt}" if preamble else prompt
+    try:
+        resp = await asyncio.to_thread(
+            dispatch.generate, model, full, system,
+            temperature=0.3, category="chat", tool="chat",
+        )
+        return _clean(getattr(resp, "content", "") or "")
+    except Exception as exc:  # noqa: BLE001 - surfaced as a red bubble by the caller
+        return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
 def _build_prompt_session(session_id: str) -> PromptSession:
@@ -573,7 +676,7 @@ def _models_table() -> str:
 
 def _header(cheap: str | None, smart: str | None) -> Panel:
     lines = Group(
-        Text.assemble(("PAL", "bold cyan"), (" chat", "bold")),
+        Text.assemble(("sauron", "bold cyan"), (" · one agent to route them all", "bold")),
         Text.assemble(
             ("cheap ", "dim"),
             (str(cheap or "—"), "green"),
@@ -589,7 +692,11 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             style="dim",
         ),
         Text(
-            "/model (pick model) · /models (catalog) · /ask · /cheap · /smart · /agent · /help · /exit",
+            "/model · /models · /ask · /cheap · /smart · /agent · /help · /exit",
+            style="dim",
+        ),
+        Text(
+            "context: /context (show) · /history (turns) · /compact (summarize) · /clear (reset)",
             style="dim",
         ),
         Text(
@@ -868,7 +975,7 @@ async def _run(handle):
     from providers.router import chat_router
 
     cwd = os.getcwd()
-    cont: str | None = None
+    history: list[dict] = []  # self-contained rolling conversation context (Phase 3)
     agent_warned = False
     tools_full_warned = False
     selected_model: str | None = os.getenv("PAL_CHAT_MODEL") or None  # /model or PAL_CHAT_MODEL pins it
@@ -880,6 +987,7 @@ async def _run(handle):
                       "use /plan <goal> to draft, /feed to run it through PAL[/]")
 
     session = None
+    session_id = "repl"
     if _PT_OK and sys.stdin.isatty():
         try:
             session_id = chat_history.new_session_id()
@@ -902,6 +1010,46 @@ async def _run(handle):
             return 0
         if low in ("/help", "/h", "?"):
             console.print(_header(r0["cheap"], r0["smart"]))
+            continue
+        if low in ("/clear", "/reset", "/new"):
+            history.clear()
+            console.print("[dim]context cleared — starting fresh[/]")
+            continue
+        if low in ("/context", "/ctx"):
+            chars = sum(len(t.get("content") or "") for t in history)
+            console.print(Panel(
+                Text.assemble(
+                    ("session  ", "dim"), (f"{session_id}\n", ""),
+                    ("cwd      ", "dim"), (f"{cwd}\n", ""),
+                    ("model    ", "dim"), (f"{selected_model or 'auto (routed)'}\n", ""),
+                    ("turns    ", "dim"), (f"{len(history)}\n", ""),
+                    ("context  ", "dim"), (f"~{chars} chars (~{chars // 4} tokens), budget {_CTX_BUDGET}", ""),
+                ),
+                title="context", title_align="left", border_style="cyan", padding=(0, 1),
+            ))
+            continue
+        if low in ("/history", "/hist"):
+            if not history:
+                console.print("[dim]no conversation yet[/]")
+            else:
+                body = "\n\n".join(
+                    f"[{'bold green' if t['role'] == 'user' else 'bold cyan'}]"
+                    f"{'you' if t['role'] == 'user' else 'sauron'}[/]: {t['content']}"
+                    for t in history
+                )
+                console.print(Panel(body, title=f"history · {len(history)} turns",
+                                    title_align="left", border_style="cyan", padding=(0, 1)))
+            continue
+        if low.startswith("/compact"):
+            if len(history) <= 3:
+                console.print("[dim]not enough history to compact[/]")
+                continue
+            with console.status("[dim]compacting context…[/]", spinner="dots"):
+                folded, err = await asyncio.to_thread(_ctx_compact, history)
+            if err:
+                console.print(f"[red]compact failed: {err}[/] [dim](history left intact)[/]")
+            else:
+                console.print(f"[dim]compacted {folded} older turn(s) into a summary[/]")
             continue
         if low in ("/model", "/pick"):
             selected_model = await _pick_model_menu(session, cwd, selected_model)
@@ -926,8 +1074,11 @@ async def _run(handle):
                 continue
             model, q = rest[0], rest[1]
             with console.status(f"[dim]{model} (delegated) thinking…[/]", spinner="dots"):
-                ans, cont = await _ask(handle, q, model, cwd, cont, role="delegate")
+                ans = await _ask_chat(model, q, history, role="delegate")
             console.print(_bubble(model, ans, color="blue"))
+            _ctx_append(history, "user", q)
+            _ctx_append(history, "assistant", ans)
+            last_answer = ans
             continue
 
         # /agent[:edit|:plan|:review] <task> -> full Claude Code agent via clink
@@ -1153,7 +1304,6 @@ async def _run(handle):
             if draft_only:
                 console.print("[dim]↳ draft only. /feed to run it through PAL.[/]")
                 continue
-            nlines = ans.count("\n") + 1
             exec_model = selected_model or model  # execute on the model that drafted it (compliant+capable)
             if os.getenv("PAL_PLAN_BG", "1").strip().lower() not in ("0", "false", "off", "no"):
                 _pp, _rp, _pid, _mode = _launch_plan_background(goal, ans, exec_model, ptype)
@@ -1177,7 +1327,6 @@ async def _run(handle):
                 console.print("[yellow]that looks like a model refusal, not a plan — not feeding to PAL. "
                               "Re-run /plan (it retries other models) or /feed <your own plan text>.[/]")
                 continue
-            nlines = plan_text.count("\n") + 1
             if os.getenv("PAL_PLAN_BG", "1").strip().lower() not in ("0", "false", "off", "no"):
                 _pp, _rp, _pid, _mode = _launch_plan_background(None, plan_text, selected_model)
                 console.print(f"[dim]→ executing via PAL [bold]{_mode}[/] (orchestrated) in BACKGROUND "
@@ -1211,11 +1360,13 @@ async def _run(handle):
                 continue
             console.print(f"[dim]→ {model} (chat)[/]")
             with console.status(f"[dim]{model} thinking…[/]", spinner="dots"):
-                ans, cont = await _ask(
-                    handle, line, model, cwd, cont,
+                ans = await _ask_chat(
+                    model, line, history,
                     role=(forced if forced in ("cheap", "smart") else None),
                 )
             console.print(_bubble(model, ans))
+            _ctx_append(history, "user", line)
+            _ctx_append(history, "assistant", ans)
             last_answer = ans
             continue
 
@@ -1248,12 +1399,17 @@ async def _run(handle):
             )
             tools_full_warned = True
         console.print(f"[dim]→ {pool[0]} · tools (full)[/]")
+        preamble = _ctx_render(history)
         with console.status(f"[dim]{pool[0]} using tools…[/]", spinner="dots"):
-            ans, transcript, used = await _tools_loop_pool(line, pool, cwd, max_steps=8, full=True)
+            ans, transcript, used = await _tools_loop_pool(
+                line, pool, cwd, max_steps=8, full=True, history_preamble=preamble
+            )
         for name, args, _res in transcript:
             shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
             console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
         console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
+        _ctx_append(history, "user", line)
+        _ctx_append(history, "assistant", ans)
         last_answer = ans
 
 
