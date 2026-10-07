@@ -608,6 +608,67 @@ async def _ask_chat(model: str, prompt: str, history: list[dict], role: str | No
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
+# ---- auto-debate gate for huge / high-stakes tasks -------------------------
+# A "huge" task (long, multi-step, security, or one the tool loop spent many
+# steps on) is validated through the executor->reviewer->judge debate pipeline
+# before its answer is trusted, so big jobs get a gated pass/fail rather than a
+# single-shot reply. Default on; PAL_CHAT_AUTODEBATE=0 disables.
+
+def _auto_debate_enabled() -> bool:
+    return os.getenv("PAL_CHAT_AUTODEBATE", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _is_huge_task(task: str, steps: int = 0) -> bool:
+    """Heuristic: is this a big/high-stakes task that warrants a debate gate?"""
+    t = (task or "").strip()
+    if not t:
+        return False
+    if steps >= int(os.getenv("PAL_CHAT_HUGE_STEPS", "4")):
+        return True
+    if len(t) >= int(os.getenv("PAL_CHAT_HUGE_CHARS", "400")):
+        return True
+    # multi-step shape: a numbered/bulleted list, or several lines of directives
+    if t.count("\n") >= 4 or len(re.findall(r"(?mi)^\s*(?:\d+[.)]|[-*])\s+", t)) >= 3:
+        return True
+    try:
+        from providers.router import intent
+
+        if intent.classify_intent(t).is_security:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+async def _debate_gate(task: str, answer: str) -> str | None:
+    """Validate a produced answer through the debate pipeline. Returns a short
+    verdict summary, or None when debate is disabled/unavailable. Never raises."""
+    try:
+        from providers.router import debate
+
+        if not debate.is_enabled():
+            return None
+        objective = (
+            "Rigorously validate the RESULT an operator produced for the TASK. "
+            "Confirm it truly satisfies the task, is correct, and is safe/in-scope. "
+            "If sound, mark it COMPLETE; otherwise list the specific gaps, errors, "
+            "or risks that must be fixed.\n\nTASK:\n" + task.strip()
+            + "\n\nRESULT:\n" + (answer or "").strip()
+        )
+        res = await asyncio.to_thread(debate.run_debate, objective)
+        outcome = res.get("outcome", "?")
+        final = res.get("final") or {}
+        conf = final.get("confidence")
+        lines = [f"verdict: {outcome}" + (f"  ·  confidence {conf}" if conf else "")]
+        for f in (final.get("findings") or [])[:4]:
+            lines.append(f"• {str(f)[:160]}")
+        for rsk in (final.get("remaining_risks") or [])[:2]:
+            lines.append(f"⚠ {str(rsk)[:160]}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001 - a gate failure must never break the turn
+        return f"(debate gate unavailable: {type(exc).__name__})"
+
+
 def _build_prompt_session(session_id: str) -> PromptSession:
     """Claude-Code-like input: multiline buffer, Up/Down do visual-line nav
     within the draft and only fall through to history at the first/last
@@ -1468,6 +1529,20 @@ async def _run(handle):
         _ctx_append(history, "assistant", ans)
         _persist()
         last_answer = ans
+        # Huge/high-stakes task -> gate the answer through the debate panel.
+        if _auto_debate_enabled() and not ans.startswith("__ERROR__") and _is_huge_task(line, len(transcript)):
+            console.print("[dim]huge task → validating via debate panel "
+                          "(executor→reviewer→judge; PAL_CHAT_AUTODEBATE=0 to skip)…[/]")
+            try:
+                with console.status("[dim]debate panel deliberating…[/]", spinner="dots"):
+                    verdict = await _debate_gate(line, ans)
+            except KeyboardInterrupt:
+                console.print("[dim]debate gate skipped[/]")
+                verdict = None
+            if verdict:
+                _ok = verdict.startswith("verdict: COMPLETE")
+                console.print(Panel(Text(verdict), title="debate validation", title_align="left",
+                                    border_style=("green" if _ok else "yellow"), padding=(0, 1)))
 
 
 def _quiet_logging() -> None:

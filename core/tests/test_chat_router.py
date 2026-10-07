@@ -210,6 +210,57 @@ async def test_ask_chat_error_is_sentinel(monkeypatch):
     assert "provider down" in ans
 
 
+# ----- auto-debate gate for huge tasks (Phase 4) -----------------------------
+def test_is_huge_task_detects_big_and_multistep(monkeypatch):
+    monkeypatch.delenv("PAL_CHAT_HUGE_STEPS", raising=False)
+    monkeypatch.delenv("PAL_CHAT_HUGE_CHARS", raising=False)
+    assert chat_repl._is_huge_task("hi") is False
+    assert chat_repl._is_huge_task("x" * 500) is True            # long
+    assert chat_repl._is_huge_task("do it", steps=6) is True     # many tool steps
+    assert chat_repl._is_huge_task("1. recon\n2. scan\n3. report\n4. verify") is True  # list
+
+
+def test_is_huge_task_flags_security(monkeypatch):
+    from providers.router import intent
+
+    class _I:
+        is_security = True
+
+    monkeypatch.setattr(intent, "classify_intent", lambda t: _I())
+    assert chat_repl._is_huge_task("exploit the target") is True
+
+
+def test_auto_debate_enabled_default_and_off(monkeypatch):
+    monkeypatch.delenv("PAL_CHAT_AUTODEBATE", raising=False)
+    assert chat_repl._auto_debate_enabled() is True
+    monkeypatch.setenv("PAL_CHAT_AUTODEBATE", "0")
+    assert chat_repl._auto_debate_enabled() is False
+
+
+async def test_debate_gate_summarizes_verdict(monkeypatch):
+    from providers.router import debate
+
+    monkeypatch.setattr(debate, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        debate, "run_debate",
+        lambda objective, *a, **k: {
+            "outcome": "COMPLETE",
+            "final": {"confidence": 0.9, "findings": ["looks correct"], "remaining_risks": ["rate limits"]},
+        },
+    )
+    out = await chat_repl._debate_gate("big task", "the answer")
+    assert out.startswith("verdict: COMPLETE")
+    assert "looks correct" in out
+    assert "rate limits" in out
+
+
+async def test_debate_gate_none_when_disabled(monkeypatch):
+    from providers.router import debate
+
+    monkeypatch.setattr(debate, "is_enabled", lambda: False)
+    assert await chat_repl._debate_gate("t", "a") is None
+
+
 def test_ctx_compact_folds_old_turns(monkeypatch):
     from providers.router import chat_router as _cr
     from providers.router import dispatch

@@ -91,7 +91,7 @@ async def run_task(
         if isinstance(ans, str) and ans.startswith("__ERROR__") and not any(k in ans for k in _nonretry):
             continue
         break
-    return {
+    out = {
         "task": task,
         "mode": "tools",
         "model": m,
@@ -99,6 +99,18 @@ async def run_task(
         "tools_used": [{"tool": n, "args": a} for n, a, _ in transcript],
         "result": ans,
     }
+    # Huge/high-stakes task -> gate the answer through the debate panel so a
+    # scripted `pal run` gets the same validated pass/fail the REPL does.
+    if (
+        chat_repl._auto_debate_enabled()
+        and isinstance(ans, str)
+        and not ans.startswith("__ERROR__")
+        and chat_repl._is_huge_task(task, len(transcript or []))
+    ):
+        verdict = await chat_repl._debate_gate(task, ans)
+        if verdict:
+            out["validation"] = verdict
+    return out
 
 
 def _read_plan(path: str) -> list[str]:
