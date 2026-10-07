@@ -330,22 +330,34 @@ export CUSTOM_API_KEY=your-groq-key
 # optional, only if you opt in:
 export OPENAI_API_KEY=your-openai-key</pre>
 
-<h2>6. The sauron engine CLI: sauron serve / sauron run / sauron chat / /tools / /agent / /debate</h2>
-<p>Installing sauron gives you the <code>sauron</code> CLI driving the bundled core engine; <code>sauron serve</code> starts it for any client. Groq is now
-<b>required</b> for the default tool executor: <b>qwen3</b> (<code>qwen/qwen3.8-27b</code> via Groq) drives
-<code>/tools</code> and <code>sauron run</code>; gpt-oss trips Groq's output parser on tool prompts
-(400 <code>output_parse_failed</code>). Override with <code>PAL_CHAT_TOOLS_MODEL</code>.</p>
+<h2>6. The sauron engine CLI: serve / run / chat</h2>
+<p>Installing sauron gives you the <code>sauron</code> CLI driving the bundled core engine; <code>sauron serve</code> starts it for any MCP client.
+<b><code>sauron chat</code> is self-contained</b> &mdash; chat and the tool loop go straight through the engine's router (classifier routing,
+capability-matched fallback, refusal-memory, credential masking), so it needs <b>no running MCP server</b>. <b>qwen3</b>
+(<code>qwen/qwen3.8-27b</code> via Groq) is the default tool executor for <code>/tools</code> and <code>sauron run</code>; override with
+<code>PAL_CHAT_TOOLS_MODEL</code>.</p>
 <table>
   <tr><td class="key">sauron run</td><td class="name">headless one-shot</td><td><code>sauron run "&lt;task&gt;"</code> prints only the result. Flags: <code>--ro</code>, <code>--agent</code>, <code>--model</code>, <code>--plan &lt;file&gt;</code>, <code>--max-steps N</code>, <code>--agent-role autonomous|edit|plan|review</code>, <code>--json</code></td></tr>
   <tr><td class="key">--plan</td><td class="name">plan hand-off</td><td>write the job to a file, <code>sauron run --plan plan.md</code>, take the result, do not babysit</td></tr>
-  <tr><td class="key">sauron chat</td><td class="name">interactive REPL</td><td>auto cheap/smart routing (<code>/smart</code>, <code>/cheap</code>)</td></tr>
-  <tr><td class="key">/tools</td><td class="name">on-box execution</td><td>runs nmap/nuclei etc. on the box; <code>/tools:ro</code> = read-only allowlist</td></tr>
-  <tr><td class="key">/agent</td><td class="name">Claude Code sub-task</td><td><code>/agent[:edit|:plan|:review]</code> via clink</td></tr>
-  <tr><td class="key">/debate</td><td class="name">read, then decide</td><td>one model reads the files, then a panel decides</td></tr>
+  <tr><td class="key">sauron chat</td><td class="name">interactive REPL</td><td>every message runs with full tools + rolling context; <code>/ask /cheap /smart</code> = plain chat</td></tr>
+  <tr><td class="key">/agent</td><td class="name">plan vs execute</td><td><code>/agent:plan</code> &rarr; Claude (planning only); <code>/agent[:edit|:review]</code> &rarr; engine models</td></tr>
+  <tr><td class="key">/debate</td><td class="name">gated verdict</td><td>executor&rarr;reviewer&rarr;judge; auto-runs on huge/high-stakes tasks</td></tr>
+  <tr><td class="key">context</td><td class="name">persistent</td><td><code>/context /history /compact /clear /resume /status</code> &mdash; survives restarts</td></tr>
 </table>
 <p>Routing learns from real outcomes: <code>~/.pal/episodes.jsonl</code> &rarr; runtime bandit &rarr;
 <code>sauron distill</code> (human-gated proposals) plus a human-gated teacher lesson store. Groq ITPM &asymp; 7000, so the tool loop
 trims context to <code>PAL_TOOLS_CTX_CHARS</code> (default 16000). Authorized recon gets an AUTHORIZATION preamble to avoid refusals.</p>
+
+<h2>7. Self-contained engine: context, plan-only, security suite</h2>
+<table>
+  <tr><td class="key">persistent sessions</td><td class="name">SQLite, resumable</td><td>the chat context is owned by the REPL and saved to <code>~/.pal/sessions.db</code> (WAL, stdlib). A restart offers <code>/resume</code>; <code>/resume list</code> shows recent sessions; <code>/compact</code> folds old turns into a findings-preserving summary. <code>PAL_STORAGE=sqlite</code> also persists MCP threads.</td></tr>
+  <tr><td class="key">plan-only</td><td class="name">save Claude tokens</td><td>Claude is used for <b>planning only</b> (<code>/agent:plan</code>); all execution runs on the smartest local engine models, primed with an orchestrator-aware prompt. With no Claude CLI present, planning falls back to engine models too. Toggle with <code>PAL_CLAUDE_PLAN_ONLY=0</code>.</td></tr>
+  <tr><td class="key">auto-debate</td><td class="name">gated big tasks</td><td>long / multi-step / security / many-step tasks are validated through the debate panel before the answer is trusted (<code>PAL_CHAT_AUTODEBATE=0</code> to disable).</td></tr>
+  <tr><td class="key">secsuite</td><td class="name">Burp alternative</td><td>HTTP repeater, traffic search, JWT decode/forge/none-attack, response diffing and race testing &mdash; exposed as a first-class <code>secsuite</code> tool (never a shell binary). Ships with its deps (<code>requests</code>, <code>PyJWT</code>) in the engine venv.</td></tr>
+  <tr><td class="key">headroom / caveman</td><td class="name">token savers</td><td><b>headroom</b> (default on) compresses large tool/scan output at the provider boundary on every call; <b>caveman</b> attaches at session start as a skill. Check live state with <code>/status</code>.</td></tr>
+</table>
+<p>API keys are entered masked, validated for shape against the provider's expected format, stored <code>0600</code>, and never
+echoed or committed; any provider can be skipped and configured later from <code>.env.sauron</code>.</p>
 
 <div class="foot">
   Core engine: <b>bundled in ./core</b> (routing-enhanced fork) ·
