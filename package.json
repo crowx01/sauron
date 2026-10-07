@@ -19,6 +19,7 @@
   },
   "files": [
     "bin/",
+    "core/",
     "skills/",
     "docs/",
     "setup.sh",

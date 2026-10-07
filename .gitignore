@@ -4,3 +4,16 @@
 labels_overlay.svg
 sauron_flux_clean*
 sauron_labeled_v*
+
+# bundled core engine (./core) — runtime artifacts, never commit
+core/.sauron_venv/
+core/.pal_venv/
+core/**/__pycache__/
+core/**/*.pyc
+core/.pytest_cache/
+core/.ruff_cache/
+core/*.egg-info/
+core/logs/
+core/.env
+core/.env.*
+!core/.env.example

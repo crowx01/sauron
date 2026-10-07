@@ -11,7 +11,7 @@
 
 ## What it is
 
-I built Sauron as a collection of skills that let my AI orchestrator become the puppet-master of a multi-model chain for bug-bounty and offensive-security work. The installer drops the appropriate rules into Claude Code, Cursor, Cline, Codex CLI, Aider, or, for any other orchestrator, writes a portable `SYSTEM_PROMPT.md`. The setup wizard walks you through picking the orchestrator, the install scope, the skills, and the PAL models, so the master model calls the helpers while you keep the judgment calls.
+I built Sauron as a collection of skills that let my AI orchestrator become the puppet-master of a multi-model chain for bug-bounty and offensive-security work. The installer drops the appropriate rules into Claude Code, Cursor, Cline, Codex CLI, Aider, or, for any other orchestrator, writes a portable `SYSTEM_PROMPT.md`. The setup wizard walks you through picking the orchestrator, the install scope, the skills, and the routed models, so the master model calls the helpers while you keep the judgment calls.
 
 ## The Nazgul (skills)
 
@@ -70,9 +70,9 @@ flowchart TD
 
 </details>
 
-### Smarter `pal` CLI
+### The `sauron` engine CLI
 
-The PAL fork also installs a global `pal` CLI. `pal run "<task>"` is a headless one-shot (`--ro`, `--agent`, `--model`, `--json`); **`pal run --plan plan.md`** hands a whole job off and returns only the result. `pal chat` adds `/tools` (run nmap/nuclei etc. on the box; **qwen3** on Groq is the default tool executor), `/agent` (full local Claude Code), and `/debate` (reads files, then a panel decides). Routing learns from outcomes (`pal distill`). Details: [pal-router](skills/pal-router/SKILL.md).
+Installing sauron gives you the `sauron` CLI, which drives the bundled core engine. `sauron serve` starts the engine (the MCP server) for any client; `sauron run "<task>"` is a headless one-shot (`--ro`, `--agent`, `--model`, `--json`); **`sauron run --plan plan.md`** hands a whole job off and returns only the result. `sauron chat` adds `/tools` (run nmap/nuclei etc. on the box; **qwen3** on Groq is the default tool executor), `/agent` (full local Claude Code), and `/debate` (reads files, then a panel decides). Routing learns from outcomes (`sauron distill`). Details: [pal-router](skills/pal-router/SKILL.md).
 
 Full matrix: [skills/pal-router/model-map.md](skills/pal-router/model-map.md).
 
@@ -113,12 +113,13 @@ git clone https://github.com/crowx01/sauron && cd sauron
 > from a clone if you want a persistent `sauron` binary on `PATH`).
 
 `setup.sh` (and its `npx` wrapper) walks you through orchestrator, scope, which
-skills auto-load at session start, and which PAL models you have keys for, then
+skills auto-load at session start, and which routed models you have keys for, then
 handles the rest automatically: writes rules/settings, backs up existing files
 with `.bak.<timestamp>`, installs shipped skills into the right agent-specific
 directory, **auto-clones and syncs the [`Pentesting-Skills`](https://github.com/crowx01/Pentesting-Skills)
-repository into your agent's skills dir** (see below), and clones/registers the
-PAL MCP server if missing. The registered PAL ships the smart-router
+repository into your agent's skills dir** (see below), and provisions + registers
+the **bundled core engine** (shipped in `./core`, no separate download) under
+`mcpServers.pal`. The engine ships the smart-router
 (self-heal, response-cache, classifier, refusal-memory, health-probe — all
 on by default) and an opt-in **agentic toolbelt** (`PAL_TOOLBELT=1`, default
 config at `~/.pal/toolbelt.json`) that lets routed models call local
@@ -135,7 +136,7 @@ Previous installation detected.
 ✓ Orchestrator selection
 ✓ Install scope
 ✓ Skill preload picks
-✓ PAL model picks
+✓ routed-model picks
 ✓ Rules/settings file
 → Skills installed
 ○ pentesting-skills synchronised

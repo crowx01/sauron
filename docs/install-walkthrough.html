@@ -152,7 +152,7 @@
     skill gained 11 token-efficiency rules (auto-compress outputs over 5&nbsp;KB, batch PAL calls,
     { claim, confidence, source_span } triples, in-conversation failure-map, diff-first, response
     terseness ladder). Sibling detection dedups doctrine when both sauron and let-there-be-light
-    are installed. <b>PAL now installs from crowx01/pal-mcp-server</b> — the routing-enhanced fork.
+    are installed. <b>The core engine now ships bundled inside sauron at <code>./core</code></b> — the routing-enhanced fork, no separate download.
   </div>
 
   <h2>1. The orchestrator choice</h2>
@@ -222,12 +222,12 @@ Ready to write ~/.claude/settings.json
   .env.sauron written with 0600 permissions.
 
 <span class="prompt">Next steps</span>
-  1. Register PAL as an MCP server in ~/.claude.json (setup.sh does this for you
-     on the claude-code path):
+  1. Register the bundled core engine as an MCP server in ~/.claude.json (setup.sh
+     does this for you on the claude-code path):
      "mcpServers": { "pal": { "type": "stdio",
-        "command": "/path/to/pal-mcp-server/.pal_venv/bin/python",
-        "args": ["/path/to/pal-mcp-server/server.py"],
-        "env": { ...keys... } } }
+        "command": "/path/to/sauron/core/.sauron_venv/bin/python",
+        "args": ["/path/to/sauron/core/server.py"],
+        "env": { "DEFAULT_MODEL": "auto", "PAL_TOOLBELT": "1", ...keys... } } }
   2. Source your API keys: source ~/.claude/.env.sauron  (after editing it)
   3. Restart Claude Code.
   4. On the next session start the auto-invoked skills fire immediately.
@@ -320,25 +320,25 @@ export CUSTOM_API_KEY=your-groq-key
 # optional, only if you opt in:
 export OPENAI_API_KEY=your-openai-key</pre>
 
-<h2>6. Smarter pal: pal run / pal chat / /tools / /agent / /debate</h2>
-<p>The PAL fork installs a global <code>pal</code> CLI (<code>~/.local/bin/pal</code>). Groq is now
+<h2>6. The sauron engine CLI: sauron serve / sauron run / sauron chat / /tools / /agent / /debate</h2>
+<p>Installing sauron gives you the <code>sauron</code> CLI driving the bundled core engine; <code>sauron serve</code> starts it for any client. Groq is now
 <b>required</b> for the default tool executor: <b>qwen3</b> (<code>qwen/qwen3.8-27b</code> via Groq) drives
-<code>/tools</code> and <code>pal run</code>; gpt-oss trips Groq's output parser on tool prompts
+<code>/tools</code> and <code>sauron run</code>; gpt-oss trips Groq's output parser on tool prompts
 (400 <code>output_parse_failed</code>). Override with <code>PAL_CHAT_TOOLS_MODEL</code>.</p>
 <table>
-  <tr><td class="key">pal run</td><td class="name">headless one-shot</td><td><code>pal run "&lt;task&gt;"</code> prints only the result. Flags: <code>--ro</code>, <code>--agent</code>, <code>--model</code>, <code>--plan &lt;file&gt;</code>, <code>--max-steps N</code>, <code>--agent-role autonomous|edit|plan|review</code>, <code>--json</code></td></tr>
-  <tr><td class="key">--plan</td><td class="name">plan hand-off</td><td>write the job to a file, <code>pal run --plan plan.md</code>, take the result, do not babysit</td></tr>
-  <tr><td class="key">pal chat</td><td class="name">interactive REPL</td><td>auto cheap/smart routing (<code>/smart</code>, <code>/cheap</code>)</td></tr>
+  <tr><td class="key">sauron run</td><td class="name">headless one-shot</td><td><code>sauron run "&lt;task&gt;"</code> prints only the result. Flags: <code>--ro</code>, <code>--agent</code>, <code>--model</code>, <code>--plan &lt;file&gt;</code>, <code>--max-steps N</code>, <code>--agent-role autonomous|edit|plan|review</code>, <code>--json</code></td></tr>
+  <tr><td class="key">--plan</td><td class="name">plan hand-off</td><td>write the job to a file, <code>sauron run --plan plan.md</code>, take the result, do not babysit</td></tr>
+  <tr><td class="key">sauron chat</td><td class="name">interactive REPL</td><td>auto cheap/smart routing (<code>/smart</code>, <code>/cheap</code>)</td></tr>
   <tr><td class="key">/tools</td><td class="name">on-box execution</td><td>runs nmap/nuclei etc. on the box; <code>/tools:ro</code> = read-only allowlist</td></tr>
   <tr><td class="key">/agent</td><td class="name">Claude Code sub-task</td><td><code>/agent[:edit|:plan|:review]</code> via clink</td></tr>
   <tr><td class="key">/debate</td><td class="name">read, then decide</td><td>one model reads the files, then a panel decides</td></tr>
 </table>
 <p>Routing learns from real outcomes: <code>~/.pal/episodes.jsonl</code> &rarr; runtime bandit &rarr;
-<code>pal distill</code> (human-gated proposals) plus a human-gated teacher lesson store. Groq ITPM &asymp; 7000, so the tool loop
+<code>sauron distill</code> (human-gated proposals) plus a human-gated teacher lesson store. Groq ITPM &asymp; 7000, so the tool loop
 trims context to <code>PAL_TOOLS_CTX_CHARS</code> (default 16000). Authorized recon gets an AUTHORIZATION preamble to avoid refusals.</p>
 
 <div class="foot">
-  PAL server: <b>github.com/crowx01/pal-mcp-server</b> (routing-enhanced fork) ·
+  Core engine: <b>bundled in ./core</b> (routing-enhanced fork) ·
   Repo: github.com/crowx01/sauron · Sibling: crowx01/let-there-be-light (dev-lifecycle)
 </div>
 
