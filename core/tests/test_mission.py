@@ -421,3 +421,43 @@ def test_run_panel_survives_decompose_crash(monkeypatch):
     monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
     res = asyncio.run(mission.run_panel("goal", ["m1"], "j", True))
     assert res["status"] == "COMPLETE" and res["subtasks"] == ["goal"]
+
+
+def test_panel_models_round_robin_diversity(monkeypatch):
+    """Round-robin keeps rare providers from being crowded out by a big group."""
+    monkeypatch.setattr(mission, "_all_available_models",
+                        lambda: ["groqA", "groqB", "groqC", "gemX", "nvY"])
+    class _P:
+        def __init__(s, v): s.value = v
+    prov = {"groqA": _P("groq"), "groqB": _P("groq"), "groqC": _P("groq"),
+            "gemX": _P("gemini"), "nvY": _P("nvidia")}
+    monkeypatch.setattr("providers.registry.ModelProviderRegistry.get_available_models",
+                        classmethod(lambda cls, respect_restrictions=True: prov))
+    monkeypatch.setattr(mission, "_rank_for_role", lambda role, roster: list(roster))
+    picked = asyncio.run(mission._panel_models("general", 4))
+    assert picked[:3] == ["groqA", "gemX", "nvY"]  # rare providers first, not 3x groq
+    assert "nvY" in picked and "gemX" in picked
+
+
+def test_synth_prefers_largest_context(monkeypatch):
+    monkeypatch.setattr("providers.router.size_guard.cap_for",
+                        lambda m: {"small": 7500, "huge": 900000}.get(m, 100000))
+
+    def fake_generate(model, prompt, system, **kw):
+        if "decomposer" in (system or "").lower():
+            return _resp(json.dumps({"subtasks": ["a"]}))
+        if "SYNTHESIZER" in (system or ""):
+            return _resp("MERGED")
+        if "JUDGE" in (system or ""):
+            return _resp(json.dumps({"decision": "COMPLETE"}))
+        return _resp(json.dumps({"files": [], "commands": []}))
+
+    async def fake_execute(plan, executor, full, goal=""):
+        return {"files_written": ["/x"], "edits_applied": [], "results": [], "verify": [{"cmd": "t", "exit": 0, "ok": True}]}
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr(mission, "_execute_plan", fake_execute)
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
+    monkeypatch.setattr(mission, "_rank_for_role", lambda role, roster: list(roster))
+    res = asyncio.run(mission.run_panel("goal", ["small", "huge"], "judge", True))
+    assert res["synthesizer"] == "huge"  # biggest-context model chosen for the merge
