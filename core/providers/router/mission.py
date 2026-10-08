@@ -375,23 +375,26 @@ async def _panel_models(mtype: str, cap: int) -> list[str]:
         p = prov_map.get(m)
         return getattr(p, "value", str(p))
 
-    picked: list[str] = []
-    seen_prov: set[str] = set()
-    # pass 1: one model per provider — maximise provider diversity / token spread
+    # group ranked models by provider (rank order preserved within each group),
+    # then ROUND-ROBIN across providers so no single provider (e.g. a cloud of
+    # gemini aliases) can crowd out rarer ones like nvidia/cohere. This keeps real
+    # provider diversity across ALL slots, not just the first of each.
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
     for m in ranked:
         p = prov_of(m)
-        if p not in seen_prov:
-            picked.append(m)
-            seen_prov.add(p)
-        if len(picked) >= cap:
-            return picked
-    # pass 2: fill remaining slots by rank
-    for m in ranked:
-        if m not in picked:
-            picked.append(m)
-        if len(picked) >= cap:
-            break
-    return picked
+        if p not in groups:
+            groups[p] = []
+            order.append(p)
+        groups[p].append(m)
+    picked: list[str] = []
+    idx = 0
+    while len(picked) < cap and any(groups[p] for p in order):
+        p = order[idx % len(order)]
+        if groups[p]:
+            picked.append(groups[p].pop(0))
+        idx += 1
+    return picked[:cap]
 
 
 async def run_panel(goal, models, judge, full):
@@ -434,8 +437,12 @@ async def run_panel(goal, models, judge, full):
     results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
 
     # SYNTHESIS (M5): a strong reasoning model merges every sub-result into one
-    # unified output — the "many models as a whole one model" step.
-    synth = _pick(_rank_for_role("synth", models)) or models[0]
+    # unified output — the "many models as a whole one model" step. Prefer the
+    # BIGGEST-context available model so the merge prompt doesn't trip a small
+    # per-minute token cap (groq gpt-oss 8k TPM rate-limited the synth, 2026-10-08).
+    from providers.router import size_guard as _sg
+
+    synth = _pick(sorted(_rank_for_role("synth", models), key=lambda m: -_sg.cap_for(m))) or models[0]
     synthesis = ""
     try:
         sr = await asyncio.to_thread(
