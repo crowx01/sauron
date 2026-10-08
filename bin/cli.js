@@ -36,6 +36,7 @@ ${BOLD}Install & skills${RST} (github: form works without npm publish)
   npx --yes github:crowx01/sauron list           list shipped + pentesting-skills
   npx --yes github:crowx01/sauron sync           re-sync pentesting-skills + shipped
   npx --yes github:crowx01/sauron reset          clear checkpoint
+  npx --yes github:crowx01/sauron selftest       validate shipped files (no network)
   sauron --help                                  this help
 
 ${DIM}From a local clone: ./setup.sh <install-verb>   ·   node bin/cli.js <verb>${RST}
@@ -104,6 +105,15 @@ switch (cmd) {
   case 'reset':
     runSetup(['reset']);
     break;
+  case 'selftest': {
+    const script = path.join(ROOT, 'bin', 'sauron-selftest');
+    if (!fs.existsSync(script)) {
+      console.error(`${RED}✗${RST} bin/sauron-selftest missing in ${ROOT}`);
+      process.exit(1);
+    }
+    const r = spawnSync('bash', [script], { stdio: 'inherit' });
+    process.exit(r.status == null ? 1 : r.status);
+  }
   default:
     console.error(`${RED}✗${RST} unknown command: ${cmd}`);
     usage();

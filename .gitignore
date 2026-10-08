@@ -17,3 +17,7 @@ core/logs/
 core/.env
 core/.env.*
 !core/.env.example
+
+# selftest / py_compile byproducts
+__pycache__/
+*.pyc
