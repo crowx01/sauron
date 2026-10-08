@@ -1236,20 +1236,101 @@ def _is_huge_task(task: str, steps: int = 0) -> bool:
     return False
 
 
-async def _debate_gate(task: str, answer: str) -> str | None:
+def _summarize_tool_evidence(transcript) -> dict:
+    """Extract structured evidence from a ``_tools_loop`` transcript so the
+    debate executor can honestly populate its Handoff's ``files_changed`` /
+    ``commands_executed`` / ``tests_executed`` / ``evidence`` lists instead of
+    having to guess from the final-answer prose. Without this, reviewers flag
+    the handoff "No pytest output / git status / files_changed array empty"
+    even when the executor really did run those commands — the evidence
+    simply never reached the panel.
+
+    Each transcript entry is ``(tool_name, args_dict, result_str)``. We cap
+    stdout/stderr tails at a few hundred bytes per entry so the objective
+    stays model-token-sized."""
+    commands: list[dict] = []
+    files: list[dict] = []
+    tests: list[dict] = []
+    evidence: list[dict] = []
+    for entry in transcript or []:
+        try:
+            name, args, res = entry
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        res_str = res if isinstance(res, str) else str(res)
+        tail = res_str[-800:] if len(res_str) > 800 else res_str
+        if name == "bash":
+            cmd = (args.get("command") or args.get("cmd") or "").strip()
+            if not cmd:
+                continue
+            commands.append({"cmd": cmd[:400], "output_tail": tail})
+            low = cmd.lower()
+            if "pytest" in low or re.search(r"\bpython(3)?\s+-m\s+pytest\b", low) or "unittest" in low:
+                tests.append({"cmd": cmd[:400], "output_tail": tail})
+            if low.startswith("git status") or low.startswith("git diff") or " git status" in low:
+                evidence.append({"kind": "git", "cmd": cmd[:400], "output_tail": tail})
+        elif name in ("write_file", "edit_file", "patch_file"):
+            path = args.get("path") or args.get("file") or args.get("filename")
+            if path:
+                files.append({"path": str(path), "op": name, "result_tail": tail[-200:]})
+        elif name == "read_file":
+            path = args.get("path") or args.get("file")
+            if path:
+                evidence.append({"kind": "read", "path": str(path), "output_tail": tail[-300:]})
+        else:
+            evidence.append(
+                {
+                    "kind": "tool",
+                    "name": name,
+                    "args": {k: str(v)[:160] for k, v in args.items()},
+                    "output_tail": tail,
+                }
+            )
+    return {
+        "commands_executed": commands,
+        "files_changed": files,
+        "tests_executed": tests,
+        "evidence": evidence,
+    }
+
+
+async def _debate_gate(task: str, answer: str, transcript=None) -> str | None:
     """Validate a produced answer through the debate pipeline. Returns a short
-    verdict summary, or None when debate is disabled/unavailable. Never raises."""
+    verdict summary, or None when debate is disabled/unavailable. Never raises.
+
+    ``transcript`` is the ``[(tool, args, result), ...]`` list from the main
+    ``_tools_loop`` for this turn. When present, we serialize its structured
+    evidence (bash commands + outputs, pytest runs, git status, file writes)
+    into the debate objective so the executor can populate ``files_changed``
+    / ``commands_executed`` / ``tests_executed`` / ``evidence`` with real
+    data. Without this the reviewer rightfully flags unverifiable claims
+    (``No captured output from `git status`; cannot confirm ... files
+    match``, ``No pytest output provided; cannot verify 56/56 passed``,
+    ``files_changed array is empty despite the handoff describing
+    modifications``) and the gate returns verdict=ERROR."""
     try:
         from providers.router import debate
 
         if not debate.is_enabled():
             return None
+        evidence = _summarize_tool_evidence(transcript)
+        try:
+            evid_json = json.dumps(evidence, default=str)[:8000]
+        except (TypeError, ValueError):
+            evid_json = "{}"
         objective = (
             "Rigorously validate the RESULT an operator produced for the TASK. "
             "Confirm it truly satisfies the task, is correct, and is safe/in-scope. "
             "If sound, mark it COMPLETE; otherwise list the specific gaps, errors, "
             "or risks that must be fixed.\n\nTASK:\n" + task.strip()
             + "\n\nRESULT:\n" + (answer or "").strip()
+            + "\n\nTOOL_EVIDENCE (verbatim from the operator's tool loop; populate "
+            "your handoff's files_changed / commands_executed / tests_executed / "
+            "evidence arrays FROM THIS — do not invent, do not drop entries, do "
+            "not claim 'no output provided' when a tail is present here):\n"
+            + evid_json
         )
         res = await asyncio.to_thread(debate.run_debate, objective)
         outcome = res.get("outcome", "?")
@@ -2925,7 +3006,7 @@ async def _run(handle):
                   "debate")
             try:
                 with console.status("[dim]debate panel deliberating…[/]", spinner="dots"):
-                    verdict = await _debate_gate(line, ans)
+                    verdict = await _debate_gate(line, ans, transcript)
             except KeyboardInterrupt:
                 _note("debate gate skipped", "sys")
                 verdict = None
