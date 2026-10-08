@@ -238,3 +238,38 @@ def test_gate_allows_complete_with_changes_and_passing_verify(monkeypatch, tmp_p
     monkeypatch.setattr("providers.router.chat_repl._tools_loop", fake_loop)
     res = asyncio.run(mission.run_mission("write stuff", writer="w", executor="e", judge="j", max_iters=2, auto=False))
     assert res["status"] == "COMPLETE" and res["iterations"] == 1 and target.read_text() == "X"
+
+
+# --- P5 follow-up: writer failover on empty plan -----------------------------
+
+def test_plan_is_actionable():
+    assert mission._plan_is_actionable({"files": [{"path": "x"}]}) is True
+    assert mission._plan_is_actionable({"commands": ["ls"]}) is True
+    assert mission._plan_is_actionable({"edits": [{"path": "x"}]}) is True
+    assert mission._plan_is_actionable({"files": [], "edits": [], "commands": []}) is False
+    assert mission._plan_is_actionable({}) is False
+    assert mission._plan_is_actionable(None) is False
+
+
+def test_writer_failover_on_empty_plan(monkeypatch, tmp_path):
+    """First writer emits an empty plan; the loop rotates to the next writer in
+    the same iteration and that one produces the real work."""
+    target = tmp_path / "w.txt"
+    good = json.dumps({"files": [{"path": str(target), "content": "Y"}], "verify": ["true"]})
+    empty = json.dumps({"files": [], "edits": [], "commands": []})
+
+    def fake_generate(model, prompt, system, **kw):
+        if "WRITER" in system:
+            return _resp(empty if model == "w1" else good)
+        return _resp(json.dumps({"decision": "COMPLETE"}))
+
+    async def fake_loop(task, model, cwd, max_steps=3, full=True):
+        return ("", [])
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr("providers.router.chat_repl._tools_loop", fake_loop)
+    monkeypatch.setattr(mission, "_writer_pool", lambda mtype: ["w1", "w2"])
+    res = asyncio.run(mission.run_mission("write stuff", writer="w1", executor="e", judge="j", max_iters=1, auto=False))
+    assert res["status"] == "COMPLETE"
+    assert target.read_text() == "Y"
+    assert res["transcript"][0]["writer"] == "w2"
