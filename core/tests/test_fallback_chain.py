@@ -27,9 +27,26 @@ def _reset_state(monkeypatch, tmp_path):
     monkeypatch.setenv("PAL_ENV_JSON", str(env_file))
     monkeypatch.setenv("PAL_FALLBACK", "1")
     monkeypatch.delenv("PAL_FALLBACK_MAX", raising=False)
+    monkeypatch.delenv("PAL_QUARANTINE", raising=False)
     fc.reset_cache()
+    fc.reset_quarantine()
     yield
     fc.reset_cache()
+    fc.reset_quarantine()
+
+
+def test_402_quarantines_provider_for_run():
+    """A credit/quota (402) failure quarantines the provider for the session so
+    subsequent chains skip it instead of re-hitting a dead account."""
+    def call(m: str):
+        if m == "nemotron":
+            raise RuntimeError("Error code: 402 — no remaining credits")
+        return "ok"
+
+    assert fc.call_with_fallback(call, "nemotron") == "ok"
+    assert fc.is_quarantined("nemotron") is True
+    # a fresh chain that would include the quarantined provider now skips it
+    assert "nemotron" not in fc._merge_chain("or-free", ["nemotron", "gemini-3.6-flash"])
 
 
 # ----- should_fallback --------------------------------------------------------
@@ -96,9 +113,11 @@ def test_413_triggers_fallback_to_next_peer():
             raise HTTPError("Error code: 413 — request too large")
         return f"served by {m}"
 
+    # On 413 the untried tail is reordered biggest-context first, so the oversize
+    # request jumps to gemini-3.6-flash (900k cap) rather than or-free (30k).
     result = fc.call_with_fallback(call, "nemotron")
-    assert result == "served by or-free"
-    assert calls == ["nemotron", "or-free"]
+    assert result == "served by gemini-3.6-flash"
+    assert calls == ["nemotron", "gemini-3.6-flash"]
 
 
 def test_silent_block_in_result_triggers_fallback():
@@ -157,7 +176,7 @@ def test_on_switch_callback_fires():
     )
     assert len(events) == 1
     assert events[0][0] == "nemotron"
-    assert events[0][1] == "or-free"
+    assert events[0][1] == "gemini-3.6-flash"  # 413 reorders tail biggest-context first
     assert "413" in events[0][2]
 
 
@@ -241,3 +260,12 @@ def test_extra_chain_respects_max_attempts(monkeypatch):
     with pytest.raises(RuntimeError):
         fc.call_with_fallback(call, "some/random-model", extra_chain=["a", "b", "c"])
     assert calls == ["some/random-model", "a"]  # capped at 2 total
+
+
+def test_should_fallback_on_dead_model_400():
+    """A 400 that means the model id doesn't exist must skip to the next peer;
+    a generic 400 must NOT trigger fallback."""
+    assert fc.should_fallback(400, "Error code: 400 - model_not_found") is True
+    assert fc.should_fallback(400, "The model does not exist") is True
+    assert fc.should_fallback(400, "bad request: missing required field") is False
+    assert fc.should_fallback(None, "unknown model foo-bar") is True

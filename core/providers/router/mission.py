@@ -31,10 +31,16 @@ _WRITER_SYS = (
     "mission, acceptance criteria and feedback, output ONLY one JSON object:\n"
     '{"files":[{"path":"...","content":"..."}],'
     '"edits":[{"path":"...","old":"exact snippet from the file","new":"replacement"}],'
-    '"commands":["..."],"rationale":"...","done_hint":false}\n'
+    '"commands":["..."],"verify":["read-only bash check that EXITS 0 iff a '
+    'criterion holds"],"rationale":"...","done_hint":false}\n'
     "Use edits to MODIFY existing files: old must match the current file text "
     "exactly and be small+unique; use files only for NEW files; commands run bash "
-    "on Kali. Preserve all unrelated code."
+    "on Kali. Preserve all unrelated code.\n"
+    "verify: one read-only command per acceptance criterion that a machine runs — "
+    "its EXIT CODE is the proof (e.g. `test -f out.xlsx`, `grep -q foo file`, "
+    "`python -m pytest -q path`). For a measurement/probe criterion, verify with a "
+    "DIFFERENT tool than the one that produced the result (e.g. confirm an httpx "
+    "status with curl). The mission cannot complete until every verify exits 0."
 )
 _REVIEWER_SYS = (
     "You are a REVIEWER sub-agent. Given the mission, the writer's plan and the "
@@ -46,8 +52,20 @@ _JUDGE_SYS = (
     "You are the JUDGE sub-agent. Given the mission, acceptance criteria, the "
     "executor's results and any reviewer notes, output ONLY one JSON object:\n"
     '{"decision":"COMPLETE","reason":"...","feedback":"..."}\n'
-    'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when every '
-    "acceptance criterion is verified; otherwise CONTINUE with concrete feedback."
+    'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when the RESULTS show '
+    "real changes on disk (files_written / edits_applied / command output) AND "
+    "every verify check exited 0. Never infer success from the writer's prose or a "
+    "claim that work was done — only from the executor's recorded evidence. If "
+    "nothing was written or a verify failed, CONTINUE with concrete feedback."
+)
+
+
+_SYNTH_SYS = (
+    "You are the SYNTHESIZER — the final stage that makes many models act as ONE. "
+    "Given the mission and the per-subtask results produced by DIFFERENT models, merge "
+    "them into one coherent result: reconcile conflicts, drop errors, keep the best of "
+    "each. Output the unified result directly (prose or the final artifact text), no JSON "
+    "wrapper."
 )
 
 
@@ -166,16 +184,96 @@ def _team_for(complexity: int) -> dict:
 
 
 def _writer_pool(mtype: str) -> list[str]:
-    default = ["gemini-3.5-flash-lite", "openai/gpt-oss-120b", "qwen3"]
-    # code/analysis favour a stronger reasoning model as writer
-    if mtype in ("code", "analysis"):
-        default = ["openai/gpt-oss-120b", "gemini-3.5-flash-lite", "qwen3"]
+    # gpt-oss-120b leads by default: it is the reliable structured-JSON emitter;
+    # weaker writers (e.g. nemotron-3-ultra) emit empty plans headless (2026-10-08).
+    default = ["openai/gpt-oss-120b", "gemini-3.5-flash-lite", "qwen3"]
     return _env_models("PAL_MISSION_WRITER_MODELS", default)
 
 
 def _executor_pool(mtype: str) -> list[str]:
     default = ["qwen3", "openai/gpt-oss-120b", "gemini-3.5-flash-lite"]
     return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
+
+
+# --- M1-M2: full-roster ensemble + capability-aware, fair-use scheduling -------
+
+def _all_available_models() -> list[str]:
+    """The FULL available roster across every configured provider (groq, gemini,
+    nvidia, cohere, ollama_cloud, openrouter, …) — never a hardcoded subset, and
+    never Claude. This is what lets a mission engage models sauron rarely picks."""
+    from providers.registry import ModelProviderRegistry
+    from providers.router import chat_repl
+
+    try:
+        names = list(ModelProviderRegistry.get_available_models(respect_restrictions=True).keys())
+    except Exception:
+        names = []
+    out, seen = [], set()
+    for m in _no_claude(names):
+        if m in seen:
+            continue
+        seen.add(m)
+        try:
+            if chat_repl._is_available(m):
+                out.append(m)
+        except Exception:
+            pass
+    return out
+
+
+def _model_capabilities(model: str) -> set[str]:
+    """Coarse capability tags from the size cap + model id, to put each model on
+    the role it is best at."""
+    from providers.router import size_guard
+
+    tags: set[str] = set()
+    cap = size_guard.cap_for(model)
+    if cap >= 200_000:
+        tags.add("long_context")
+    if cap <= 8000:
+        tags.add("bulk_cheap")
+    ml = model.lower()
+    if any(k in ml for k in ("oss", "qwen", "codex", "coder", "code", "deepseek")):
+        tags.add("code")
+    if any(k in ml for k in ("flash", "lite", "nano", "20b", "fast", "haiku")):
+        tags.add("bulk_cheap")
+    if any(k in ml for k in ("pro", "120b", "super", "gpt-5", "o3", "grok", "command-a", "ultra", "plus")):
+        tags.add("reasoning")
+    if any(k in ml for k in ("flash", "gemini", "oss", "command", "qwen", "nemotron")):
+        tags.add("structured")
+    # permissive for offensive-security content; exclude known refusers (cohere / plain flash)
+    if any(k in ml for k in ("or-free", "openrouter", "grok", "nemotron", "oss", "qwen")):
+        tags.add("security_permissive")
+    return tags
+
+
+_ROLE_WANT = {
+    "writer": {"code", "reasoning", "structured"},
+    "reviewer": {"reasoning", "structured"},
+    "synth": {"reasoning", "long_context"},
+    "executor": {"code", "bulk_cheap"},
+    "assess": {"bulk_cheap"},
+}
+
+
+def _rank_for_role(role: str, roster: list[str]) -> list[str]:
+    """Rank a roster for a role: best capability match first, then (fair-use) the
+    LEAST-used model first, so capable-but-underused models get engaged instead of
+    the same few every mission. PAL_MISSION_FAIR_USE=0 disables the fairness term."""
+    want = _ROLE_WANT.get(role, set())
+    fair = os.getenv("PAL_MISSION_FAIR_USE", "1") not in ("0", "false", "no")
+
+    def used_count(m: str) -> int:
+        if not fair:
+            return 0
+        try:
+            from providers.router import episode_store
+
+            return episode_store.observed(m, "mission")[0]
+        except Exception:
+            return 0
+
+    return sorted(roster, key=lambda m: (-len(_model_capabilities(m) & want), used_count(m), m))
 
 
 def _repo_context(goal: str, max_bytes: int = 18000) -> str:
@@ -251,29 +349,52 @@ def _is_protected(path: str) -> bool:
 
 
 async def _panel_models(mtype: str, cap: int) -> list[str]:
+    """Pick up to `cap` models for an ensemble, drawing from the WHOLE roster and
+    spreading across DISTINCT providers first — so idle/rarely-used accounts get
+    engaged and no single provider is overloaded. Falls back to a curated list
+    only if roster discovery yields nothing."""
+    from providers.registry import ModelProviderRegistry
     from providers.router import chat_repl
 
-    candidates = _writer_pool(mtype) + _executor_pool(mtype) + [
-        "command-r-08-2024",
-        "meta-llama/Llama-3.1-8B-Instruct",
-        "Qwen/Qwen3.8-27B",
-        "deepseek-ai/DeepSeek-V4.1-Flash",
-        "zai-org/GLM-5.3-Flash",
-        "openai/gpt-oss-20b",
-        "gemini-flash-latest",
-    ]
+    roster = _all_available_models()
+    if not roster:
+        for m in _writer_pool(mtype) + _executor_pool(mtype) + ["command-r-08-2024", "openai/gpt-oss-20b"]:
+            if m not in roster and "claude" not in m.lower() and "anthropic" not in m.lower():
+                try:
+                    if chat_repl._is_available(m):
+                        roster.append(m)
+                except Exception:
+                    pass
+    ranked = _rank_for_role("writer", roster)
+    try:
+        prov_map = ModelProviderRegistry.get_available_models(respect_restrictions=True)
+    except Exception:
+        prov_map = {}
+
+    def prov_of(m: str) -> str:
+        p = prov_map.get(m)
+        return getattr(p, "value", str(p))
+
+    # group ranked models by provider (rank order preserved within each group),
+    # then ROUND-ROBIN across providers so no single provider (e.g. a cloud of
+    # gemini aliases) can crowd out rarer ones like nvidia/cohere. This keeps real
+    # provider diversity across ALL slots, not just the first of each.
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for m in ranked:
+        p = prov_of(m)
+        if p not in groups:
+            groups[p] = []
+            order.append(p)
+        groups[p].append(m)
     picked: list[str] = []
-    for m in candidates:
-        if m in picked or "claude" in m.lower() or "anthropic" in m.lower():
-            continue
-        try:
-            if chat_repl._is_available(m):
-                picked.append(m)
-        except Exception:
-            pass
-        if len(picked) >= cap:
-            break
-    return picked
+    idx = 0
+    while len(picked) < cap and any(groups[p] for p in order):
+        p = order[idx % len(order)]
+        if groups[p]:
+            picked.append(groups[p].pop(0))
+        idx += 1
+    return picked[:cap]
 
 
 async def run_panel(goal, models, judge, full):
@@ -282,15 +403,20 @@ async def run_panel(goal, models, judge, full):
     from providers.router import dispatch
 
     criteria = f"The mission is accomplished and verified on disk: {goal}"
-    dec = await asyncio.to_thread(
-        dispatch.generate, models[0],
-        f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
-        f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
-        "You are a terse mission decomposer.", temperature=0.2,
-        category="mission", tool="mission", max_output_tokens=500,
-    )
-    subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
-    subs = subs[: len(models)]
+    # decompose is guarded: a dead model here must not crash the whole mission.
+    try:
+        dec = await asyncio.to_thread(
+            dispatch.generate, models[0],
+            f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
+            f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
+            "You are a terse mission decomposer.", temperature=0.2,
+            category="mission", tool="mission", max_output_tokens=500,
+        )
+        subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mission: decompose failed (%s) → single subtask", str(exc)[:120])
+        subs = [goal]
+    subs = subs[: len(models)] or [goal]
     repo_ctx = _repo_context(goal)
 
     async def _do(i, sub):
@@ -309,16 +435,52 @@ async def run_panel(goal, models, judge, full):
             return {"subtask": sub, "model": m, "error": str(exc)[:120]}
 
     results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
-    jr = await asyncio.to_thread(
-        dispatch.generate, judge,
-        f"MISSION: {goal}\nACCEPTANCE: {criteria}\nPANEL_RESULTS: {json.dumps(results)[:4000]}",
-        _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
-    )
-    verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+
+    # SYNTHESIS (M5): a strong reasoning model merges every sub-result into one
+    # unified output — the "many models as a whole one model" step. Prefer the
+    # BIGGEST-context available model so the merge prompt doesn't trip a small
+    # per-minute token cap (groq gpt-oss 8k TPM rate-limited the synth, 2026-10-08).
+    from providers.router import size_guard as _sg
+
+    synth = _pick(sorted(_rank_for_role("synth", models), key=lambda m: -_sg.cap_for(m))) or models[0]
+    synthesis = ""
+    try:
+        sr = await asyncio.to_thread(
+            dispatch.generate, synth,
+            f"MISSION: {goal}\nPER-SUBTASK RESULTS (each by a different model):\n"
+            f"{json.dumps(results)[:6000]}\n\nMerge into ONE unified result.",
+            _SYNTH_SYS, temperature=0.2, category="mission", tool="mission",
+            max_output_tokens=int(os.getenv("PAL_MISSION_SYNTH_TOKENS", "2000")),
+        )
+        synthesis = (getattr(sr, "content", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
+
+    merged = {"files_written": [], "edits_applied": [], "results": [], "verify": []}
+    for r in results:
+        rep = r.get("exec") or {}
+        for k in merged:
+            merged[k].extend(rep.get(k, []) or [])
+    # judge is guarded: if the judge model is down, decide from deterministic
+    # evidence so a mission whose verify already passed still COMPLETEs.
+    try:
+        jr = await asyncio.to_thread(
+            dispatch.generate, judge,
+            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
+            f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
+            _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
+        )
+        verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mission: judge failed (%s) → deterministic verdict", str(exc)[:120])
+        verdict = _gate_verdict(goal, merged)
+    verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
+    contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
     return {
         "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
         "mode": "panel", "team_size": len(models), "models": models,
         "subtasks": subs, "results": results, "judge": judge, "verdict": verdict,
+        "synthesizer": synth, "synthesis": synthesis, "contributors": contributors,
     }
 
 
@@ -338,7 +500,7 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
     except Exception:
         _gtok = None
 
-    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": []}
+    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": [], "verify": []}
     for e in plan.get("edits", []) or []:
         path, old, new = e.get("path"), e.get("old"), e.get("new")
         if path and _is_protected(path):
@@ -371,6 +533,26 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
             executor, os.getcwd(), max_steps=3, full=full,
         )
         report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
+    # VERIFY: machine-run read-only checks whose EXIT CODE is the proof. Run with
+    # subprocess so the result is deterministic (not an LLM's claim about it).
+    # PAL_MISSION_VERIFY=0 disables.
+    if os.getenv("PAL_MISSION_VERIFY", "1") not in ("0", "false", "no"):
+        import subprocess
+
+        for vc in plan.get("verify", []) or []:
+            if not isinstance(vc, str) or not vc.strip():
+                continue
+            try:
+                pr = subprocess.run(
+                    ["bash", "-c", vc], capture_output=True, text=True,
+                    timeout=int(os.getenv("PAL_MISSION_VERIFY_TIMEOUT", "60")), cwd=os.getcwd(),
+                )
+                code, out = pr.returncode, (pr.stdout + pr.stderr)[-400:]
+            except subprocess.TimeoutExpired:
+                code, out = None, "timeout"
+            except Exception as exc:  # noqa: BLE001
+                code, out = None, str(exc)[:200]
+            report["verify"].append({"cmd": vc, "exit": code, "ok": code == 0, "output": out})
     if _gtok is not None:
         try:
             from providers.tooling import authz as _authz
@@ -384,6 +566,80 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
 def _goal_artifacts(goal: str) -> list[str]:
     """Absolute-ish file paths the goal asks to produce, for on-disk verification."""
     return re.findall(r"(/[\w./\-]+\.[A-Za-z0-9]{1,6})", goal or "")
+
+
+def _plan_is_actionable(plan: dict) -> bool:
+    """True iff the writer actually proposed work (a file, an edit, or a command).
+    An empty plan means the writer only talked — rotate to the next writer instead
+    of burning the iteration (nemotron-3-ultra did this every round on 2026-10-08)."""
+    if not isinstance(plan, dict):
+        return False
+    return bool(plan.get("files") or plan.get("edits") or plan.get("commands"))
+
+
+def _made_changes(report: dict) -> bool:
+    """True iff the executor actually did something real: wrote a file, applied an
+    edit, or ran a command that produced output. An empty report means the writer
+    only talked (the 2026-10-08 flash-lite 'done, 0 edits' hallucination)."""
+    if report.get("files_written") or report.get("edits_applied"):
+        return True
+    return any((r.get("answer") or "").strip() for r in report.get("results", []) or [])
+
+
+def _verify_tally(report: dict) -> tuple[int, int]:
+    """(#verify checks run, #passed)."""
+    v = report.get("verify") or []
+    return len(v), sum(1 for x in v if x.get("ok"))
+
+
+def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
+    """Exec-free hard checks that OVERRIDE an LLM judge's COMPLETE. Returns
+    ("CONTINUE", reason) when completion must be blocked, else (None, "").
+
+    Precedence: when the writer supplied ``verify`` checks, their EXIT CODES are
+    the proof and decide the gate outright — all passing ⇒ allow, any failing ⇒
+    block. Goal-text artifact matching is only a FALLBACK for missions with no
+    verify, because it greedily matches INPUT source paths named in the goal and
+    would otherwise false-veto a genuinely complete mission (2026-10-08)."""
+    ran, passed = _verify_tally(report)
+    if ran:
+        if passed < ran:
+            failed = [x.get("cmd") for x in report.get("verify", []) if not x.get("ok")]
+            return "CONTINUE", f"verify check(s) did not exit 0: {failed}"
+        return None, ""  # every verify passed → trust the machine-checked proof
+    # No verify checks: fall back to artifact existence + real-change heuristics.
+    artifacts = _goal_artifacts(goal)
+    missing = [p for p in artifacts if not os.path.exists(p)]
+    if artifacts and missing:
+        return "CONTINUE", f"required artifact(s) missing on disk: {missing}"
+    if not _made_changes(report):
+        return "CONTINUE", "no file changes applied and no passing verify evidence"
+    return None, ""
+
+
+def _gate_verdict(goal: str, report: dict) -> dict:
+    """A verdict derived purely from deterministic evidence — used when the LLM
+    judge is unavailable, so a mission whose verify passed (or that made real
+    changes with nothing failing) still COMPLETEs instead of crashing."""
+    forced, why = _deterministic_gate(goal, report)
+    ran, passed = _verify_tally(report)
+    if forced is None and ((ran and passed == ran) or _made_changes(report)):
+        return {"decision": "COMPLETE", "reason": "deterministic evidence (verify passed / changes applied)"}
+    return {"decision": "CONTINUE", "feedback": why or "no verified evidence"}
+
+
+def _apply_gate(goal: str, report: dict, verdict: dict) -> dict:
+    """Downgrade a COMPLETE verdict to CONTINUE when the deterministic gate fails,
+    annotating the feedback so the next iteration gets a concrete reason."""
+    if str(verdict.get("decision", "")).upper() != "COMPLETE":
+        return verdict
+    forced, why = _deterministic_gate(goal, report)
+    if forced == "CONTINUE":
+        log.warning("mission: deterministic gate overrode judge COMPLETE → CONTINUE (%s)", why)
+        fb = (verdict.get("feedback", "") or "").strip()
+        return {"decision": "CONTINUE", "reason": verdict.get("reason", ""),
+                "feedback": f"{fb} [gate: {why}]".strip(), "gate_override": True}
+    return verdict
 
 
 async def run_mission(
@@ -404,16 +660,32 @@ async def run_mission(
     mtype = assessment["type"]
     max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "4"))
 
-    # PANEL: many models in parallel for complex missions (or PAL_MISSION_PANEL=1).
+    # ENSEMBLE (M3): use the whole roster as one synthesized team. Default "all"
+    # engages the panel for EVERY mission that has at least PAL_MISSION_MIN_MODELS
+    # distinct models; "auto" keeps the old complexity>=4 trigger; "off" disables.
+    # When fewer than the floor are available it degrades to the writer/executor
+    # team (or single) path below.
+    _ensemble = os.getenv("PAL_MISSION_ENSEMBLE", "all").lower()
     _panel = os.getenv("PAL_MISSION_PANEL", "auto").lower()
-    if auto and (_panel in ("1", "true", "yes") or (_panel == "auto" and assessment["complexity"] >= 4)):
-        cap = int(os.getenv("PAL_MISSION_PANEL_MAX", "10"))
-        pmodels = await _panel_models(mtype, cap)
-        if len(pmodels) >= 3:
-            pjudge = judge or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
-            res = await run_panel(goal, pmodels, pjudge, full)
-            res["assessment"] = assessment
-            return res
+    min_models = max(2, int(os.getenv("PAL_MISSION_MIN_MODELS", "3")))
+    if auto and _ensemble != "off":
+        want_panel = (
+            _panel in ("1", "true", "yes")
+            or _ensemble == "all"
+            or (_panel == "auto" and assessment["complexity"] >= 4)
+        )
+        if want_panel:
+            cap = int(os.getenv("PAL_MISSION_PANEL_MAX", "12"))
+            pmodels = await _panel_models(mtype, cap)
+            if len(pmodels) >= min_models:
+                pjudge = (
+                    judge
+                    or _pick(_rank_for_role("reviewer", _all_available_models()))
+                    or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
+                )
+                res = await run_panel(goal, pmodels, pjudge, full)
+                res["assessment"] = assessment
+                return res
 
     used: set[str] = set()
     writer = writer or _pick(_writer_pool(mtype))
@@ -453,14 +725,28 @@ async def run_mission(
     transcript: list[dict] = []
     feedback = ""
     repo_ctx = _repo_context(goal)
+    # writer failover: if the chosen writer emits an empty plan, rotate to the next
+    # writer WITHIN the same iteration instead of wasting it (deterministic-first).
+    writer_tries = max(1, int(os.getenv("PAL_MISSION_WRITER_TRIES", "3")))
+    writer_candidates = [writer] + [m for m in _writer_pool(mtype) if m != writer]
     for iteration in range(1, max_iters + 1):
-        wr = await asyncio.to_thread(
-            dispatch.generate, writer,
-            f"REPO CONTEXT:\n{repo_ctx}\n\nMISSION: {goal}\nACCEPTANCE: {criteria}\nFEEDBACK: {feedback or '(none)'}",
-            _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
-            max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+        plan: dict = {}
+        writer_used = writer
+        wr_prompt = (
+            f"REPO CONTEXT:\n{repo_ctx}\n\nMISSION: {goal}\nACCEPTANCE: {criteria}\n"
+            f"FEEDBACK: {feedback or '(none)'}"
         )
-        plan = _extract_json(getattr(wr, "content", "") or "") or {}
+        for cand in writer_candidates[:writer_tries]:
+            wr = await asyncio.to_thread(
+                dispatch.generate, cand, wr_prompt, _WRITER_SYS,
+                temperature=0.2, category="mission", tool="mission",
+                max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+            )
+            plan = _extract_json(getattr(wr, "content", "") or "") or {}
+            writer_used = cand
+            if _plan_is_actionable(plan):
+                break
+            log.warning("mission: writer %s emitted an empty plan → failing over to next writer", cand)
         report = await _execute_plan(plan, executor, full, goal=goal)
 
         review_notes = []
@@ -479,7 +765,8 @@ async def run_mission(
             _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
         )
         verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE", "feedback": "no verdict"}
-        transcript.append({"iteration": iteration, "writer": writer, "executor": executor,
+        verdict = _apply_gate(goal, report, verdict)  # deterministic override of hallucinated COMPLETE
+        transcript.append({"iteration": iteration, "writer": writer_used, "executor": executor,
                            "reviewers": reviewer_models, "judge": judge, "plan": plan,
                            "exec": report, "reviews": review_notes, "verdict": verdict})
         if str(verdict.get("decision", "")).upper() == "COMPLETE":

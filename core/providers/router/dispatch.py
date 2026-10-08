@@ -87,7 +87,7 @@ def generate(
             system = (_cv + "\n\n" + system) if system else _cv
 
     dispatch_model = model
-    ok, hint = check_or_reroute(dispatch_model, prompt)
+    ok, hint = check_or_reroute(dispatch_model, prompt, system=system, tools=tools)
     if not ok and hint and hint.startswith("route:") and hint != "route:none":
         alt = hint.split(":", 1)[1]
         log.warning("size-guard: %s over cap → pre-routing to %s", dispatch_model, alt)
@@ -206,7 +206,7 @@ def generate_stream(
             system = (cv + "\n\n" + system) if system else cv
 
     dispatch_model = model
-    ok, hint = check_or_reroute(dispatch_model, prompt)
+    ok, hint = check_or_reroute(dispatch_model, prompt, system=system)
     if not ok and hint and hint.startswith("route:") and hint != "route:none":
         dispatch_model = hint.split(":", 1)[1]
 
