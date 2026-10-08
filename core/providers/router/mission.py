@@ -175,10 +175,9 @@ def _team_for(complexity: int) -> dict:
 
 
 def _writer_pool(mtype: str) -> list[str]:
-    default = ["gemini-3.5-flash-lite", "openai/gpt-oss-120b", "qwen3"]
-    # code/analysis favour a stronger reasoning model as writer
-    if mtype in ("code", "analysis"):
-        default = ["openai/gpt-oss-120b", "gemini-3.5-flash-lite", "qwen3"]
+    # gpt-oss-120b leads by default: it is the reliable structured-JSON emitter;
+    # weaker writers (e.g. nemotron-3-ultra) emit empty plans headless (2026-10-08).
+    default = ["openai/gpt-oss-120b", "gemini-3.5-flash-lite", "qwen3"]
     return _env_models("PAL_MISSION_WRITER_MODELS", default)
 
 
@@ -421,6 +420,15 @@ def _goal_artifacts(goal: str) -> list[str]:
     return re.findall(r"(/[\w./\-]+\.[A-Za-z0-9]{1,6})", goal or "")
 
 
+def _plan_is_actionable(plan: dict) -> bool:
+    """True iff the writer actually proposed work (a file, an edit, or a command).
+    An empty plan means the writer only talked — rotate to the next writer instead
+    of burning the iteration (nemotron-3-ultra did this every round on 2026-10-08)."""
+    if not isinstance(plan, dict):
+        return False
+    return bool(plan.get("files") or plan.get("edits") or plan.get("commands"))
+
+
 def _made_changes(report: dict) -> bool:
     """True iff the executor actually did something real: wrote a file, applied an
     edit, or ran a command that produced output. An empty report means the writer
@@ -536,14 +544,28 @@ async def run_mission(
     transcript: list[dict] = []
     feedback = ""
     repo_ctx = _repo_context(goal)
+    # writer failover: if the chosen writer emits an empty plan, rotate to the next
+    # writer WITHIN the same iteration instead of wasting it (deterministic-first).
+    writer_tries = max(1, int(os.getenv("PAL_MISSION_WRITER_TRIES", "3")))
+    writer_candidates = [writer] + [m for m in _writer_pool(mtype) if m != writer]
     for iteration in range(1, max_iters + 1):
-        wr = await asyncio.to_thread(
-            dispatch.generate, writer,
-            f"REPO CONTEXT:\n{repo_ctx}\n\nMISSION: {goal}\nACCEPTANCE: {criteria}\nFEEDBACK: {feedback or '(none)'}",
-            _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
-            max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+        plan: dict = {}
+        writer_used = writer
+        wr_prompt = (
+            f"REPO CONTEXT:\n{repo_ctx}\n\nMISSION: {goal}\nACCEPTANCE: {criteria}\n"
+            f"FEEDBACK: {feedback or '(none)'}"
         )
-        plan = _extract_json(getattr(wr, "content", "") or "") or {}
+        for cand in writer_candidates[:writer_tries]:
+            wr = await asyncio.to_thread(
+                dispatch.generate, cand, wr_prompt, _WRITER_SYS,
+                temperature=0.2, category="mission", tool="mission",
+                max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+            )
+            plan = _extract_json(getattr(wr, "content", "") or "") or {}
+            writer_used = cand
+            if _plan_is_actionable(plan):
+                break
+            log.warning("mission: writer %s emitted an empty plan → failing over to next writer", cand)
         report = await _execute_plan(plan, executor, full, goal=goal)
 
         review_notes = []
@@ -563,7 +585,7 @@ async def run_mission(
         )
         verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE", "feedback": "no verdict"}
         verdict = _apply_gate(goal, report, verdict)  # deterministic override of hallucinated COMPLETE
-        transcript.append({"iteration": iteration, "writer": writer, "executor": executor,
+        transcript.append({"iteration": iteration, "writer": writer_used, "executor": executor,
                            "reviewers": reviewer_models, "judge": judge, "plan": plan,
                            "exec": report, "reviews": review_notes, "verdict": verdict})
         if str(verdict.get("decision", "")).upper() == "COMPLETE":
