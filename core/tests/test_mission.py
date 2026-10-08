@@ -100,6 +100,7 @@ def test_single_mode_completes_when_artifact_exists(monkeypatch, tmp_path):
     async def fake_loop(task, model, cwd, max_steps=6, full=True):
         return ("[reached max tool steps]", [])  # no clean final answer
 
+    monkeypatch.setenv("PAL_MISSION_ENSEMBLE", "off")  # single mode only exists with ensemble off
     monkeypatch.setattr("providers.router.chat_repl._tools_loop", fake_loop)
     monkeypatch.setattr(mission, "assess_mission", lambda g: {"type": "fileops", "complexity": 1})
     monkeypatch.setattr(mission, "_pick", lambda models: "solo-model")
@@ -286,3 +287,90 @@ def test_gate_ignores_input_paths_when_verify_passes():
     report["verify"][0] = {"cmd": "test -f x", "exit": 1, "ok": False}
     forced, _ = mission._deterministic_gate(goal, report)
     assert forced == "CONTINUE"
+
+
+# --- all-models ensemble (M1-M5) ---------------------------------------------
+
+def test_all_available_models_excludes_claude(monkeypatch):
+    class _P:  # fake provider enum
+        def __init__(s, v): s.value = v
+    roster = {"claude-opus-4-8": _P("anthropic"), "openai/gpt-oss-120b": _P("groq"),
+              "gemini-3.5-flash-lite": _P("gemini"), "nvidia/nemotron-3-super-120b-a12b": _P("nvidia")}
+    monkeypatch.setattr("providers.registry.ModelProviderRegistry.get_available_models",
+                        classmethod(lambda cls, respect_restrictions=True: roster))
+    monkeypatch.setattr("providers.router.chat_repl._is_available", lambda m: True)
+    got = mission._all_available_models()
+    assert "claude-opus-4-8" not in got
+    assert set(got) == {"openai/gpt-oss-120b", "gemini-3.5-flash-lite", "nvidia/nemotron-3-super-120b-a12b"}
+
+
+def test_rank_for_role_prefers_underused(monkeypatch):
+    """Two equally-capable models: the LEAST-used one ranks first (anti-starvation)."""
+    roster = ["aaa-overused", "zzz-underused"]
+    # equal capability for both → the fairness (usage) term decides the order
+    monkeypatch.setattr(mission, "_model_capabilities", lambda m: {"code", "structured"})
+    counts = {"aaa-overused": 99, "zzz-underused": 1}
+    monkeypatch.setenv("PAL_MISSION_FAIR_USE", "1")
+    monkeypatch.setattr("providers.router.episode_store.observed",
+                        lambda m, cat, window=200: (counts.get(m, 0), 0))
+    assert mission._rank_for_role("writer", roster)[0] == "zzz-underused"  # least-used wins
+    monkeypatch.setenv("PAL_MISSION_FAIR_USE", "0")
+    assert mission._rank_for_role("writer", roster)[0] == "aaa-overused"  # usage ignored → name order
+
+
+def test_panel_models_spreads_across_providers(monkeypatch):
+    """pass-1 picks one model per provider first → provider diversity / token spread."""
+    monkeypatch.setattr(mission, "_all_available_models",
+                        lambda: ["groqA", "groqB", "gemX", "nvY"])
+    class _P:
+        def __init__(s, v): s.value = v
+    prov = {"groqA": _P("groq"), "groqB": _P("groq"), "gemX": _P("gemini"), "nvY": _P("nvidia")}
+    monkeypatch.setattr("providers.registry.ModelProviderRegistry.get_available_models",
+                        classmethod(lambda cls, respect_restrictions=True: prov))
+    monkeypatch.setattr(mission, "_rank_for_role", lambda role, roster: list(roster))
+    picked = asyncio.run(mission._panel_models("general", 3))
+    # three distinct providers before a second groq
+    assert picked == ["groqA", "gemX", "nvY"]
+
+
+def test_ensemble_default_runs_panel(monkeypatch):
+    """PAL_MISSION_ENSEMBLE=all makes run_mission take the panel path when the
+    distinct-model floor is met — proving M3 is actually wired."""
+    monkeypatch.setenv("PAL_MISSION_ENSEMBLE", "all")
+    monkeypatch.setattr(mission, "assess_mission", lambda g: {"type": "general", "complexity": 2})
+
+    async def fake_panel_models(mtype, cap):
+        return ["m1", "m2", "m3"]
+
+    async def fake_run_panel(goal, models, judge, full):
+        return {"status": "COMPLETE", "mode": "panel", "models": models, "contributors": models}
+
+    monkeypatch.setattr(mission, "_panel_models", fake_panel_models)
+    monkeypatch.setattr(mission, "run_panel", fake_run_panel)
+    monkeypatch.setattr(mission, "_all_available_models", lambda: ["m1", "m2", "m3"])
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
+    res = asyncio.run(mission.run_mission("do something", auto=True))
+    assert res["mode"] == "panel" and res["status"] == "COMPLETE"
+
+
+def test_run_panel_synthesizes_and_records_contributors(monkeypatch):
+    """run_panel runs the synthesizer and records every contributing model."""
+    def fake_generate(model, prompt, system, **kw):
+        if "decomposer" in (system or "").lower():
+            return _resp(json.dumps({"subtasks": ["a", "b"]}))
+        if "SYNTHESIZER" in (system or ""):
+            return _resp("UNIFIED RESULT")
+        if "JUDGE" in (system or ""):
+            return _resp(json.dumps({"decision": "COMPLETE"}))
+        return _resp(json.dumps({"files": [], "commands": []}))
+
+    async def fake_execute(plan, executor, full, goal=""):
+        return {"files_written": ["/x"], "edits_applied": [], "results": [], "verify": [{"cmd": "t", "exit": 0, "ok": True}]}
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr(mission, "_execute_plan", fake_execute)
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
+    res = asyncio.run(mission.run_panel("goal", ["m1", "m2"], "judge", True))
+    assert res["synthesis"] == "UNIFIED RESULT"
+    assert "m1" in res["contributors"] and "m2" in res["contributors"]
+    assert res["status"] == "COMPLETE"
