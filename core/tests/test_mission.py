@@ -273,3 +273,16 @@ def test_writer_failover_on_empty_plan(monkeypatch, tmp_path):
     assert res["status"] == "COMPLETE"
     assert target.read_text() == "Y"
     assert res["transcript"][0]["writer"] == "w2"
+
+
+def test_gate_ignores_input_paths_when_verify_passes():
+    """Input SOURCE paths named in the goal must NOT false-veto a mission whose
+    verify checks all passed — verify exit codes take precedence (2026-10-08 regr)."""
+    goal = "build clean.py that reads webs/url_extract_nodupes.txt and webs/webs_all.txt"
+    report = {"files_written": ["/out/clean.py"],
+              "verify": [{"cmd": "test -f x", "exit": 0, "ok": True}]}
+    assert mission._deterministic_gate(goal, report) == (None, "")
+    # but a FAILING verify still blocks, regardless of input-path noise
+    report["verify"][0] = {"cmd": "test -f x", "exit": 1, "ok": False}
+    forced, _ = mission._deterministic_gate(goal, report)
+    assert forced == "CONTINUE"
