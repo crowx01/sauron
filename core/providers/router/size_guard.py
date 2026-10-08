@@ -44,19 +44,63 @@ _CATEGORY_ALTS = {
 }
 
 
-def guess_input_tokens(prompt: str, files: list[str] | None = None) -> int:
-    """Rough token estimate: 4 chars per token for prose, plus file bytes//4."""
+def _tools_tokens(tools) -> int:
+    """Estimate token cost of tool/function schemas in the outbound request."""
+    if not tools:
+        return 0
+    try:
+        import json
+
+        return len(json.dumps(tools, default=str)) // 4
+    except Exception:  # noqa: BLE001 — fall back to a flat per-tool estimate
+        return 250 * len(tools)
+
+
+def guess_input_tokens(
+    prompt: str,
+    files: list[str] | None = None,
+    system: str | None = None,
+    tools=None,
+) -> int:
+    """Rough token estimate (~4 chars/token) for the WHOLE outbound request:
+    prompt + files + system + tool schemas + a fixed safety overhead.
+
+    Counting the prompt alone under-counts: the system preamble, tool schemas and
+    framing push the real request well past the estimate, so a near-cap prompt
+    sails past the guard and 413s at the provider (observed 2026-10-08: a ~7.1k
+    real request estimated as <6.5k and hit a hard 413)."""
     total = len(prompt or "") // 4
+    total += len(system or "") // 4
+    total += _tools_tokens(tools)
     for f in files or []:
         try:
             total += os.path.getsize(f) // 4
         except OSError:
             pass
+    try:
+        total += int(os.getenv("PAL_SIZE_OVERHEAD", "800"))
+    except ValueError:
+        total += 800
     return total
 
 
 def cap_for(model: str) -> int:
     return MODEL_INPUT_CAPS.get(model, _DEFAULT_CAP)
+
+
+def _margin() -> float:
+    """Safety fraction of the raw cap to actually use (env PAL_SIZE_MARGIN)."""
+    try:
+        m = float(os.getenv("PAL_SIZE_MARGIN", "0.9"))
+        return m if 0.1 < m <= 1.0 else 0.9
+    except ValueError:
+        return 0.9
+
+
+def effective_cap(model: str) -> int:
+    """Usable input cap after the safety margin, so near-cap requests reroute
+    to a bigger-context peer instead of burning a 413 round-trip."""
+    return int(cap_for(model) * _margin())
 
 
 def _bigger_alt(model: str) -> str | None:
@@ -69,12 +113,21 @@ def _bigger_alt(model: str) -> str | None:
     return "nemotron" if cap_for("nemotron") > my_cap else None
 
 
-def check_or_reroute(model: str, prompt: str, files: list[str] | None = None) -> tuple[bool, str | None]:
-    """Return (True, None) if the request fits the model's cap. Otherwise
-    (False, "route:<alt>") hinting a same-category (or global-fallback)
-    model with a larger cap, or "route:none" when no bigger alt exists."""
-    tokens = guess_input_tokens(prompt, files)
-    if tokens <= cap_for(model):
+def check_or_reroute(
+    model: str,
+    prompt: str,
+    files: list[str] | None = None,
+    system: str | None = None,
+    tools=None,
+) -> tuple[bool, str | None]:
+    """Return (True, None) if the request fits the model's effective cap.
+    Otherwise (False, "route:<alt>") hinting a same-category (or global-fallback)
+    model with a larger cap, or "route:none" when no bigger alt exists.
+
+    ``system`` and ``tools`` are counted when supplied so the estimate reflects
+    the whole outbound request, not just the prompt."""
+    tokens = guess_input_tokens(prompt, files, system, tools)
+    if tokens <= effective_cap(model):
         return True, None
     alt = _bigger_alt(model)
     return False, f"route:{alt}" if alt else "route:none"

@@ -21,6 +21,8 @@ import logging
 import os
 import re
 
+log = logging.getLogger(__name__)
+
 
 def _setup() -> None:
     os.environ["LOG_LEVEL"] = os.getenv("PAL_CHAT_LOGLEVEL", "ERROR")
@@ -132,15 +134,36 @@ async def run_task(
 
 
 def _read_plan(path: str) -> list[str]:
-    steps: list[str] = []
+    """Split a plan file into steps — ONE per line (md bullets/numbering stripped).
+
+    Guard against the per-line foot-gun: a prose/markdown spec (long paragraphs,
+    ``##`` headings, few bullet lines) is NOT a list of steps. Splitting it feeds
+    one giant paragraph as a single oversized "step" and thrashes the fallback
+    chain (observed 2026-10-08). When the file looks like prose, return the WHOLE
+    file as a single task — same as ``--task-file``. Set PAL_PLAN_SPLIT=1 to force
+    the old per-line behavior."""
     with open(path, encoding="utf-8") as fp:
-        for raw in fp:
-            ln = raw.strip()
-            if not ln or ln.startswith("#"):
-                continue
-            ln = re.sub(r"^([-*+]|\d+[.)])\s+", "", ln)  # strip md bullets / numbering
-            if ln:
-                steps.append(ln)
+        raw_lines = fp.read().splitlines()
+
+    content = [ln.strip() for ln in raw_lines if ln.strip() and not ln.strip().startswith("#")]
+    if not content:
+        return []
+
+    if os.getenv("PAL_PLAN_SPLIT", "0") not in ("1", "true", "yes"):
+        has_long_line = any(len(ln) > 400 for ln in content)
+        has_md_heading = any(re.match(r"^#{2,6}\s", ln) for ln in raw_lines)
+        bulletish = sum(1 for ln in content if re.match(r"^([-*+]|\d+[.)])\s+", ln))
+        looks_like_list = content and (bulletish / len(content)) >= 0.6
+        if has_long_line or has_md_heading or not looks_like_list:
+            whole = "\n".join(raw_lines).strip()
+            log.info("run --plan: prose/markdown spec detected → running whole file as ONE task")
+            return [whole] if whole else []
+
+    steps: list[str] = []
+    for ln in content:
+        ln = re.sub(r"^([-*+]|\d+[.)])\s+", "", ln)  # strip md bullets / numbering
+        if ln:
+            steps.append(ln)
     return steps
 
 

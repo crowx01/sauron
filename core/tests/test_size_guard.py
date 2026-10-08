@@ -6,17 +6,44 @@ from providers.router.size_guard import (
     MODEL_INPUT_CAPS,
     cap_for,
     check_or_reroute,
+    effective_cap,
     guess_input_tokens,
 )
 
 
-def test_guess_tokens_prompt_only():
+def test_guess_tokens_prompt_only(monkeypatch):
+    monkeypatch.setenv("PAL_SIZE_OVERHEAD", "0")  # isolate raw prompt math
     assert guess_input_tokens("a" * 400) == 100
 
 
-def test_guess_tokens_empty_prompt():
+def test_guess_tokens_empty_prompt(monkeypatch):
+    monkeypatch.setenv("PAL_SIZE_OVERHEAD", "0")
     assert guess_input_tokens("") == 0
     assert guess_input_tokens(None) == 0  # type: ignore[arg-type]
+
+
+def test_guess_tokens_counts_system_tools_and_overhead(monkeypatch):
+    monkeypatch.delenv("PAL_SIZE_OVERHEAD", raising=False)  # default 800
+    # prompt 100 + system 50 + default overhead 800
+    assert guess_input_tokens("a" * 400, system="s" * 200) == 100 + 50 + 800
+    # tool schemas add tokens on top of the overhead
+    tools = [{"name": "probe", "schema": "x" * 800}]
+    assert guess_input_tokens("", tools=tools) > 800
+
+
+def test_effective_cap_applies_margin(monkeypatch):
+    monkeypatch.setenv("PAL_SIZE_MARGIN", "0.9")
+    assert effective_cap("groq") == int(7500 * 0.9)
+
+
+def test_near_cap_reroutes_once_overhead_counted(monkeypatch):
+    monkeypatch.setenv("PAL_SIZE_OVERHEAD", "800")
+    monkeypatch.setenv("PAL_SIZE_MARGIN", "0.9")
+    # qwen3 raw cap 6500 → effective ~5850. A prompt that is alone under the raw
+    # cap but, once system + overhead are counted, exceeds the effective cap.
+    prompt = "a" * (5600 * 4)          # ~5600 tok
+    ok, hint = check_or_reroute("qwen3", prompt, system="s" * (1200 * 4))  # +1200 +800
+    assert ok is False and hint and hint.startswith("route:")
 
 
 def test_cap_default_for_unknown():
@@ -48,7 +75,8 @@ def test_check_or_reroute_oversize_unknown_hints_nemotron():
     assert hint == "route:nemotron"
 
 
-def test_guess_tokens_missing_file_ok():
+def test_guess_tokens_missing_file_ok(monkeypatch):
+    monkeypatch.setenv("PAL_SIZE_OVERHEAD", "0")
     assert guess_input_tokens("hi", ["/no/such/file"]) == 0
 
 

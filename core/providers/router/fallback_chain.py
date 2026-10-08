@@ -38,6 +38,57 @@ SILENT_BLOCK_MARKERS: tuple[str, ...] = (
 )
 
 
+# --- session provider quarantine -------------------------------------------
+# Providers that fail with a credit/quota-exhaustion error (402, "no remaining
+# credits") stay broken for the whole run, so retrying them on every mission step
+# just burns round-trips (observed 2026-10-08: HuggingFace 402'd on every call
+# yet stayed in the chain). Once a provider trips this, we skip it for the rest
+# of the process. Env PAL_QUARANTINE=0 disables.
+_QUARANTINE: set[str] = set()
+
+_CREDIT_MARKERS: tuple[str, ...] = (
+    "no remaining credits",
+    "insufficient credits",
+    "insufficient_quota",
+    "quota exceeded",
+    "payment required",
+    "billing",
+)
+
+
+def _quarantine_enabled() -> bool:
+    return os.getenv("PAL_QUARANTINE", "1") not in ("0", "false", "no")
+
+
+def _provider_prefix(model: str) -> str:
+    """Provider id = text before the first '/' (e.g. 'meta-llama/Llama-3…' → 'meta-llama')."""
+    return (model or "").split("/", 1)[0].strip().lower()
+
+
+def _is_credit_failure(status: int | None, text: str) -> bool:
+    if status == 402:
+        return True
+    low = (text or "").lower()
+    return any(m in low for m in _CREDIT_MARKERS)
+
+
+def quarantine(model: str) -> None:
+    if _quarantine_enabled():
+        pref = _provider_prefix(model)
+        if pref and pref not in _QUARANTINE:
+            _QUARANTINE.add(pref)
+            log.warning("fallback: quarantined provider '%s' for this run (credit/quota failure)", pref)
+
+
+def is_quarantined(model: str) -> bool:
+    return _quarantine_enabled() and _provider_prefix(model) in _QUARANTINE
+
+
+def reset_quarantine() -> None:
+    """Test helper — clear the session quarantine set."""
+    _QUARANTINE.clear()
+
+
 def _env_path() -> Path:
     return Path(os.getenv("PAL_ENV_JSON", str(Path.home() / ".pal/env.json")))
 
@@ -143,10 +194,25 @@ def _merge_chain(model: str, extra_chain: Iterable[str] | None) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
     for m in ordered:
-        if m and m not in seen:
-            seen.add(m)
-            out.append(m)
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        # never drop the primary; skip peers whose provider is quarantined
+        if m != model and is_quarantined(m):
+            continue
+        out.append(m)
     return out[: _max_attempts()]
+
+
+def _reorder_for_oversize(candidates: list[str]) -> list[str]:
+    """On a 413, prefer the biggest-context peers first so an oversize request
+    jumps straight to a model that can hold it rather than walking small peers."""
+    try:
+        from providers.router import size_guard
+
+        return sorted(candidates, key=lambda m: size_guard.cap_for(m), reverse=True)
+    except Exception:  # noqa: BLE001
+        return candidates
 
 
 def call_with_fallback(
@@ -176,7 +242,9 @@ def call_with_fallback(
     chain = _merge_chain(model, extra_chain)
     last_exc: Exception | None = None
 
-    for i, candidate in enumerate(chain):
+    i = 0
+    while i < len(chain):
+        candidate = chain[i]
         try:
             result = call(candidate)
         except Exception as exc:  # noqa: BLE001 — we deliberately catch to reroute
@@ -184,6 +252,14 @@ def call_with_fallback(
             if not should_fallback(status, text):
                 raise
             last_exc = exc
+            # credit/quota exhaustion → quarantine the provider and prune its
+            # peers from the untried tail so we stop hitting a dead account.
+            if _is_credit_failure(status, text):
+                quarantine(candidate)
+                chain = chain[: i + 1] + [m for m in chain[i + 1 :] if not is_quarantined(m)]
+            # payload-too-large → reorder the untried tail biggest-context first.
+            if status == 413 and i + 1 < len(chain):
+                chain = chain[: i + 1] + _reorder_for_oversize(chain[i + 1 :])
             if i + 1 < len(chain):
                 reason = f"status={status} | {text[:120]}"
                 log.warning("fallback: %s → %s (%s)", candidate, chain[i + 1], reason)
@@ -193,6 +269,7 @@ def call_with_fallback(
                     except Exception:  # noqa: BLE001
                         pass
                 attempted.append(chain[i + 1])
+            i += 1
             continue
         # Non-exception result: check for embedded silent-block markers
         result_text = _stringify_result(result)
@@ -207,6 +284,7 @@ def call_with_fallback(
                         pass
                 attempted.append(chain[i + 1])
                 last_exc = RuntimeError(f"silent-block on {candidate}")
+                i += 1
                 continue
             # exhausted — return the last (blocked) result rather than raise
             return result
