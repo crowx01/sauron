@@ -31,10 +31,16 @@ _WRITER_SYS = (
     "mission, acceptance criteria and feedback, output ONLY one JSON object:\n"
     '{"files":[{"path":"...","content":"..."}],'
     '"edits":[{"path":"...","old":"exact snippet from the file","new":"replacement"}],'
-    '"commands":["..."],"rationale":"...","done_hint":false}\n'
+    '"commands":["..."],"verify":["read-only bash check that EXITS 0 iff a '
+    'criterion holds"],"rationale":"...","done_hint":false}\n'
     "Use edits to MODIFY existing files: old must match the current file text "
     "exactly and be small+unique; use files only for NEW files; commands run bash "
-    "on Kali. Preserve all unrelated code."
+    "on Kali. Preserve all unrelated code.\n"
+    "verify: one read-only command per acceptance criterion that a machine runs — "
+    "its EXIT CODE is the proof (e.g. `test -f out.xlsx`, `grep -q foo file`, "
+    "`python -m pytest -q path`). For a measurement/probe criterion, verify with a "
+    "DIFFERENT tool than the one that produced the result (e.g. confirm an httpx "
+    "status with curl). The mission cannot complete until every verify exits 0."
 )
 _REVIEWER_SYS = (
     "You are a REVIEWER sub-agent. Given the mission, the writer's plan and the "
@@ -46,8 +52,11 @@ _JUDGE_SYS = (
     "You are the JUDGE sub-agent. Given the mission, acceptance criteria, the "
     "executor's results and any reviewer notes, output ONLY one JSON object:\n"
     '{"decision":"COMPLETE","reason":"...","feedback":"..."}\n'
-    'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when every '
-    "acceptance criterion is verified; otherwise CONTINUE with concrete feedback."
+    'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when the RESULTS show '
+    "real changes on disk (files_written / edits_applied / command output) AND "
+    "every verify check exited 0. Never infer success from the writer's prose or a "
+    "claim that work was done — only from the executor's recorded evidence. If "
+    "nothing was written or a verify failed, CONTINUE with concrete feedback."
 )
 
 
@@ -315,6 +324,12 @@ async def run_panel(goal, models, judge, full):
         _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
     )
     verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+    merged = {"files_written": [], "edits_applied": [], "results": [], "verify": []}
+    for r in results:
+        rep = r.get("exec") or {}
+        for k in merged:
+            merged[k].extend(rep.get(k, []) or [])
+    verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
     return {
         "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
         "mode": "panel", "team_size": len(models), "models": models,
@@ -338,7 +353,7 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
     except Exception:
         _gtok = None
 
-    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": []}
+    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": [], "verify": []}
     for e in plan.get("edits", []) or []:
         path, old, new = e.get("path"), e.get("old"), e.get("new")
         if path and _is_protected(path):
@@ -371,6 +386,26 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
             executor, os.getcwd(), max_steps=3, full=full,
         )
         report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
+    # VERIFY: machine-run read-only checks whose EXIT CODE is the proof. Run with
+    # subprocess so the result is deterministic (not an LLM's claim about it).
+    # PAL_MISSION_VERIFY=0 disables.
+    if os.getenv("PAL_MISSION_VERIFY", "1") not in ("0", "false", "no"):
+        import subprocess
+
+        for vc in plan.get("verify", []) or []:
+            if not isinstance(vc, str) or not vc.strip():
+                continue
+            try:
+                pr = subprocess.run(
+                    ["bash", "-c", vc], capture_output=True, text=True,
+                    timeout=int(os.getenv("PAL_MISSION_VERIFY_TIMEOUT", "60")), cwd=os.getcwd(),
+                )
+                code, out = pr.returncode, (pr.stdout + pr.stderr)[-400:]
+            except subprocess.TimeoutExpired:
+                code, out = None, "timeout"
+            except Exception as exc:  # noqa: BLE001
+                code, out = None, str(exc)[:200]
+            report["verify"].append({"cmd": vc, "exit": code, "ok": code == 0, "output": out})
     if _gtok is not None:
         try:
             from providers.tooling import authz as _authz
@@ -384,6 +419,54 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
 def _goal_artifacts(goal: str) -> list[str]:
     """Absolute-ish file paths the goal asks to produce, for on-disk verification."""
     return re.findall(r"(/[\w./\-]+\.[A-Za-z0-9]{1,6})", goal or "")
+
+
+def _made_changes(report: dict) -> bool:
+    """True iff the executor actually did something real: wrote a file, applied an
+    edit, or ran a command that produced output. An empty report means the writer
+    only talked (the 2026-10-08 flash-lite 'done, 0 edits' hallucination)."""
+    if report.get("files_written") or report.get("edits_applied"):
+        return True
+    return any((r.get("answer") or "").strip() for r in report.get("results", []) or [])
+
+
+def _verify_tally(report: dict) -> tuple[int, int]:
+    """(#verify checks run, #passed)."""
+    v = report.get("verify") or []
+    return len(v), sum(1 for x in v if x.get("ok"))
+
+
+def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
+    """Exec-free hard checks that OVERRIDE an LLM judge's COMPLETE. Returns
+    ("CONTINUE", reason) when completion must be blocked, else (None, "").
+
+    Blocks when: a goal-named artifact is missing on disk; OR the executor made
+    no real change and no verify check passed; OR any verify check failed."""
+    artifacts = _goal_artifacts(goal)
+    missing = [p for p in artifacts if not os.path.exists(p)]
+    if artifacts and missing:
+        return "CONTINUE", f"required artifact(s) missing on disk: {missing}"
+    ran, passed = _verify_tally(report)
+    if ran and passed < ran:
+        failed = [x.get("cmd") for x in report.get("verify", []) if not x.get("ok")]
+        return "CONTINUE", f"verify check(s) did not exit 0: {failed}"
+    if not _made_changes(report) and not (ran and passed == ran):
+        return "CONTINUE", "no file changes applied and no passing verify evidence"
+    return None, ""
+
+
+def _apply_gate(goal: str, report: dict, verdict: dict) -> dict:
+    """Downgrade a COMPLETE verdict to CONTINUE when the deterministic gate fails,
+    annotating the feedback so the next iteration gets a concrete reason."""
+    if str(verdict.get("decision", "")).upper() != "COMPLETE":
+        return verdict
+    forced, why = _deterministic_gate(goal, report)
+    if forced == "CONTINUE":
+        log.warning("mission: deterministic gate overrode judge COMPLETE → CONTINUE (%s)", why)
+        fb = (verdict.get("feedback", "") or "").strip()
+        return {"decision": "CONTINUE", "reason": verdict.get("reason", ""),
+                "feedback": f"{fb} [gate: {why}]".strip(), "gate_override": True}
+    return verdict
 
 
 async def run_mission(
@@ -479,6 +562,7 @@ async def run_mission(
             _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
         )
         verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE", "feedback": "no verdict"}
+        verdict = _apply_gate(goal, report, verdict)  # deterministic override of hallucinated COMPLETE
         transcript.append({"iteration": iteration, "writer": writer, "executor": executor,
                            "reviewers": reviewer_models, "judge": judge, "plan": plan,
                            "exec": report, "reviews": review_notes, "verdict": verdict})
