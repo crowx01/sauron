@@ -37,6 +37,21 @@ SILENT_BLOCK_MARKERS: tuple[str, ...] = (
     "response was blocked",
 )
 
+# A 400 is normally a client error (don't retry), EXCEPT when it means the model
+# id itself doesn't exist at the provider — a phantom/retired catalog entry (e.g.
+# a fallback target routed to the wrong provider). Those must SKIP to the next
+# peer, not raise and kill the whole chain (observed 2026-10-08:
+# openai/gpt-5.1-codex-mini 400'd model_not_found on HuggingFace and crashed a run).
+_MODEL_GONE_MARKERS: tuple[str, ...] = (
+    "model_not_found",
+    "model not found",
+    "does not exist",
+    "no such model",
+    "unknown model",
+    "model_not_exist",
+    "invalid model",
+)
+
 
 # --- session provider quarantine -------------------------------------------
 # Providers that fail with a credit/quota-exhaustion error (402, "no remaining
@@ -156,8 +171,13 @@ def should_fallback(status_code: int | None, response_text: str | Exception) -> 
     if status_code in FALLBACK_TRIGGERS:
         return True
     haystack = str(response_text or "").lower()
+    # a dead/phantom model id (400 model-not-found) must skip to the next peer
+    if status_code == 400 and any(m in haystack for m in _MODEL_GONE_MARKERS):
+        return True
     if not haystack:
         return False
+    if any(m in haystack for m in _MODEL_GONE_MARKERS):
+        return True
     return any(marker in haystack for marker in SILENT_BLOCK_MARKERS)
 
 

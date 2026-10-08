@@ -400,15 +400,20 @@ async def run_panel(goal, models, judge, full):
     from providers.router import dispatch
 
     criteria = f"The mission is accomplished and verified on disk: {goal}"
-    dec = await asyncio.to_thread(
-        dispatch.generate, models[0],
-        f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
-        f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
-        "You are a terse mission decomposer.", temperature=0.2,
-        category="mission", tool="mission", max_output_tokens=500,
-    )
-    subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
-    subs = subs[: len(models)]
+    # decompose is guarded: a dead model here must not crash the whole mission.
+    try:
+        dec = await asyncio.to_thread(
+            dispatch.generate, models[0],
+            f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
+            f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
+            "You are a terse mission decomposer.", temperature=0.2,
+            category="mission", tool="mission", max_output_tokens=500,
+        )
+        subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mission: decompose failed (%s) → single subtask", str(exc)[:120])
+        subs = [goal]
+    subs = subs[: len(models)] or [goal]
     repo_ctx = _repo_context(goal)
 
     async def _do(i, sub):
@@ -444,18 +449,24 @@ async def run_panel(goal, models, judge, full):
     except Exception as exc:  # noqa: BLE001
         synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
 
-    jr = await asyncio.to_thread(
-        dispatch.generate, judge,
-        f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
-        f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
-        _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
-    )
-    verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
     merged = {"files_written": [], "edits_applied": [], "results": [], "verify": []}
     for r in results:
         rep = r.get("exec") or {}
         for k in merged:
             merged[k].extend(rep.get(k, []) or [])
+    # judge is guarded: if the judge model is down, decide from deterministic
+    # evidence so a mission whose verify already passed still COMPLETEs.
+    try:
+        jr = await asyncio.to_thread(
+            dispatch.generate, judge,
+            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
+            f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
+            _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
+        )
+        verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mission: judge failed (%s) → deterministic verdict", str(exc)[:120])
+        verdict = _gate_verdict(goal, merged)
     verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
     contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
     return {
@@ -597,6 +608,17 @@ def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
     if not _made_changes(report):
         return "CONTINUE", "no file changes applied and no passing verify evidence"
     return None, ""
+
+
+def _gate_verdict(goal: str, report: dict) -> dict:
+    """A verdict derived purely from deterministic evidence — used when the LLM
+    judge is unavailable, so a mission whose verify passed (or that made real
+    changes with nothing failing) still COMPLETEs instead of crashing."""
+    forced, why = _deterministic_gate(goal, report)
+    ran, passed = _verify_tally(report)
+    if forced is None and ((ran and passed == ran) or _made_changes(report)):
+        return {"decision": "COMPLETE", "reason": "deterministic evidence (verify passed / changes applied)"}
+    return {"decision": "CONTINUE", "feedback": why or "no verified evidence"}
 
 
 def _apply_gate(goal: str, report: dict, verdict: dict) -> dict:
