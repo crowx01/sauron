@@ -28,6 +28,8 @@ MODEL_INPUT_CAPS: dict[str, int] = {
     "nvidia/nemotron-3.5-lightning:free": 900_000,
     "or-free": 30_000,
     "openrouter/free": 30_000,
+    "nvidia/nemotron-3-super-120b-a12b": 120_000,
+    "nvidia/nemotron-3.5-lightning-30b-a3b": 120_000,
     "gpt-5-mini": 100_000,
     "gpt-5.2": 350_000,
     "gpt-5.1-codex": 400_000,
