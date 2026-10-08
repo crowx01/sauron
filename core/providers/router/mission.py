@@ -448,17 +448,23 @@ def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
     """Exec-free hard checks that OVERRIDE an LLM judge's COMPLETE. Returns
     ("CONTINUE", reason) when completion must be blocked, else (None, "").
 
-    Blocks when: a goal-named artifact is missing on disk; OR the executor made
-    no real change and no verify check passed; OR any verify check failed."""
+    Precedence: when the writer supplied ``verify`` checks, their EXIT CODES are
+    the proof and decide the gate outright — all passing ⇒ allow, any failing ⇒
+    block. Goal-text artifact matching is only a FALLBACK for missions with no
+    verify, because it greedily matches INPUT source paths named in the goal and
+    would otherwise false-veto a genuinely complete mission (2026-10-08)."""
+    ran, passed = _verify_tally(report)
+    if ran:
+        if passed < ran:
+            failed = [x.get("cmd") for x in report.get("verify", []) if not x.get("ok")]
+            return "CONTINUE", f"verify check(s) did not exit 0: {failed}"
+        return None, ""  # every verify passed → trust the machine-checked proof
+    # No verify checks: fall back to artifact existence + real-change heuristics.
     artifacts = _goal_artifacts(goal)
     missing = [p for p in artifacts if not os.path.exists(p)]
     if artifacts and missing:
         return "CONTINUE", f"required artifact(s) missing on disk: {missing}"
-    ran, passed = _verify_tally(report)
-    if ran and passed < ran:
-        failed = [x.get("cmd") for x in report.get("verify", []) if not x.get("ok")]
-        return "CONTINUE", f"verify check(s) did not exit 0: {failed}"
-    if not _made_changes(report) and not (ran and passed == ran):
+    if not _made_changes(report):
         return "CONTINUE", "no file changes applied and no passing verify evidence"
     return None, ""
 
