@@ -60,6 +60,15 @@ _JUDGE_SYS = (
 )
 
 
+_SYNTH_SYS = (
+    "You are the SYNTHESIZER — the final stage that makes many models act as ONE. "
+    "Given the mission and the per-subtask results produced by DIFFERENT models, merge "
+    "them into one coherent result: reconcile conflicts, drop errors, keep the best of "
+    "each. Output the unified result directly (prose or the final artifact text), no JSON "
+    "wrapper."
+)
+
+
 def _no_claude(models: list[str]) -> list[str]:
     return [m for m in models if "claude" not in m.lower() and "anthropic" not in m.lower()]
 
@@ -186,6 +195,87 @@ def _executor_pool(mtype: str) -> list[str]:
     return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
 
 
+# --- M1-M2: full-roster ensemble + capability-aware, fair-use scheduling -------
+
+def _all_available_models() -> list[str]:
+    """The FULL available roster across every configured provider (groq, gemini,
+    nvidia, cohere, ollama_cloud, openrouter, …) — never a hardcoded subset, and
+    never Claude. This is what lets a mission engage models sauron rarely picks."""
+    from providers.registry import ModelProviderRegistry
+    from providers.router import chat_repl
+
+    try:
+        names = list(ModelProviderRegistry.get_available_models(respect_restrictions=True).keys())
+    except Exception:
+        names = []
+    out, seen = [], set()
+    for m in _no_claude(names):
+        if m in seen:
+            continue
+        seen.add(m)
+        try:
+            if chat_repl._is_available(m):
+                out.append(m)
+        except Exception:
+            pass
+    return out
+
+
+def _model_capabilities(model: str) -> set[str]:
+    """Coarse capability tags from the size cap + model id, to put each model on
+    the role it is best at."""
+    from providers.router import size_guard
+
+    tags: set[str] = set()
+    cap = size_guard.cap_for(model)
+    if cap >= 200_000:
+        tags.add("long_context")
+    if cap <= 8000:
+        tags.add("bulk_cheap")
+    ml = model.lower()
+    if any(k in ml for k in ("oss", "qwen", "codex", "coder", "code", "deepseek")):
+        tags.add("code")
+    if any(k in ml for k in ("flash", "lite", "nano", "20b", "fast", "haiku")):
+        tags.add("bulk_cheap")
+    if any(k in ml for k in ("pro", "120b", "super", "gpt-5", "o3", "grok", "command-a", "ultra", "plus")):
+        tags.add("reasoning")
+    if any(k in ml for k in ("flash", "gemini", "oss", "command", "qwen", "nemotron")):
+        tags.add("structured")
+    # permissive for offensive-security content; exclude known refusers (cohere / plain flash)
+    if any(k in ml for k in ("or-free", "openrouter", "grok", "nemotron", "oss", "qwen")):
+        tags.add("security_permissive")
+    return tags
+
+
+_ROLE_WANT = {
+    "writer": {"code", "reasoning", "structured"},
+    "reviewer": {"reasoning", "structured"},
+    "synth": {"reasoning", "long_context"},
+    "executor": {"code", "bulk_cheap"},
+    "assess": {"bulk_cheap"},
+}
+
+
+def _rank_for_role(role: str, roster: list[str]) -> list[str]:
+    """Rank a roster for a role: best capability match first, then (fair-use) the
+    LEAST-used model first, so capable-but-underused models get engaged instead of
+    the same few every mission. PAL_MISSION_FAIR_USE=0 disables the fairness term."""
+    want = _ROLE_WANT.get(role, set())
+    fair = os.getenv("PAL_MISSION_FAIR_USE", "1") not in ("0", "false", "no")
+
+    def used_count(m: str) -> int:
+        if not fair:
+            return 0
+        try:
+            from providers.router import episode_store
+
+            return episode_store.observed(m, "mission")[0]
+        except Exception:
+            return 0
+
+    return sorted(roster, key=lambda m: (-len(_model_capabilities(m) & want), used_count(m), m))
+
+
 def _repo_context(goal: str, max_bytes: int = 18000) -> str:
     """Current content of repo files relevant to the goal (headroom-compressed),
     so the writer modifies real code instead of guessing."""
@@ -259,26 +349,46 @@ def _is_protected(path: str) -> bool:
 
 
 async def _panel_models(mtype: str, cap: int) -> list[str]:
+    """Pick up to `cap` models for an ensemble, drawing from the WHOLE roster and
+    spreading across DISTINCT providers first — so idle/rarely-used accounts get
+    engaged and no single provider is overloaded. Falls back to a curated list
+    only if roster discovery yields nothing."""
+    from providers.registry import ModelProviderRegistry
     from providers.router import chat_repl
 
-    candidates = _writer_pool(mtype) + _executor_pool(mtype) + [
-        "command-r-08-2024",
-        "meta-llama/Llama-3.1-8B-Instruct",
-        "Qwen/Qwen3.8-27B",
-        "deepseek-ai/DeepSeek-V4.1-Flash",
-        "zai-org/GLM-5.3-Flash",
-        "openai/gpt-oss-20b",
-        "gemini-flash-latest",
-    ]
+    roster = _all_available_models()
+    if not roster:
+        for m in _writer_pool(mtype) + _executor_pool(mtype) + ["command-r-08-2024", "openai/gpt-oss-20b"]:
+            if m not in roster and "claude" not in m.lower() and "anthropic" not in m.lower():
+                try:
+                    if chat_repl._is_available(m):
+                        roster.append(m)
+                except Exception:
+                    pass
+    ranked = _rank_for_role("writer", roster)
+    try:
+        prov_map = ModelProviderRegistry.get_available_models(respect_restrictions=True)
+    except Exception:
+        prov_map = {}
+
+    def prov_of(m: str) -> str:
+        p = prov_map.get(m)
+        return getattr(p, "value", str(p))
+
     picked: list[str] = []
-    for m in candidates:
-        if m in picked or "claude" in m.lower() or "anthropic" in m.lower():
-            continue
-        try:
-            if chat_repl._is_available(m):
-                picked.append(m)
-        except Exception:
-            pass
+    seen_prov: set[str] = set()
+    # pass 1: one model per provider — maximise provider diversity / token spread
+    for m in ranked:
+        p = prov_of(m)
+        if p not in seen_prov:
+            picked.append(m)
+            seen_prov.add(p)
+        if len(picked) >= cap:
+            return picked
+    # pass 2: fill remaining slots by rank
+    for m in ranked:
+        if m not in picked:
+            picked.append(m)
         if len(picked) >= cap:
             break
     return picked
@@ -317,9 +427,27 @@ async def run_panel(goal, models, judge, full):
             return {"subtask": sub, "model": m, "error": str(exc)[:120]}
 
     results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
+
+    # SYNTHESIS (M5): a strong reasoning model merges every sub-result into one
+    # unified output — the "many models as a whole one model" step.
+    synth = _pick(_rank_for_role("synth", models)) or models[0]
+    synthesis = ""
+    try:
+        sr = await asyncio.to_thread(
+            dispatch.generate, synth,
+            f"MISSION: {goal}\nPER-SUBTASK RESULTS (each by a different model):\n"
+            f"{json.dumps(results)[:6000]}\n\nMerge into ONE unified result.",
+            _SYNTH_SYS, temperature=0.2, category="mission", tool="mission",
+            max_output_tokens=int(os.getenv("PAL_MISSION_SYNTH_TOKENS", "2000")),
+        )
+        synthesis = (getattr(sr, "content", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
+
     jr = await asyncio.to_thread(
         dispatch.generate, judge,
-        f"MISSION: {goal}\nACCEPTANCE: {criteria}\nPANEL_RESULTS: {json.dumps(results)[:4000]}",
+        f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
+        f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
         _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
     )
     verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
@@ -329,10 +457,12 @@ async def run_panel(goal, models, judge, full):
         for k in merged:
             merged[k].extend(rep.get(k, []) or [])
     verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
+    contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
     return {
         "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
         "mode": "panel", "team_size": len(models), "models": models,
         "subtasks": subs, "results": results, "judge": judge, "verdict": verdict,
+        "synthesizer": synth, "synthesis": synthesis, "contributors": contributors,
     }
 
 
@@ -501,16 +631,32 @@ async def run_mission(
     mtype = assessment["type"]
     max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "4"))
 
-    # PANEL: many models in parallel for complex missions (or PAL_MISSION_PANEL=1).
+    # ENSEMBLE (M3): use the whole roster as one synthesized team. Default "all"
+    # engages the panel for EVERY mission that has at least PAL_MISSION_MIN_MODELS
+    # distinct models; "auto" keeps the old complexity>=4 trigger; "off" disables.
+    # When fewer than the floor are available it degrades to the writer/executor
+    # team (or single) path below.
+    _ensemble = os.getenv("PAL_MISSION_ENSEMBLE", "all").lower()
     _panel = os.getenv("PAL_MISSION_PANEL", "auto").lower()
-    if auto and (_panel in ("1", "true", "yes") or (_panel == "auto" and assessment["complexity"] >= 4)):
-        cap = int(os.getenv("PAL_MISSION_PANEL_MAX", "10"))
-        pmodels = await _panel_models(mtype, cap)
-        if len(pmodels) >= 3:
-            pjudge = judge or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
-            res = await run_panel(goal, pmodels, pjudge, full)
-            res["assessment"] = assessment
-            return res
+    min_models = max(2, int(os.getenv("PAL_MISSION_MIN_MODELS", "3")))
+    if auto and _ensemble != "off":
+        want_panel = (
+            _panel in ("1", "true", "yes")
+            or _ensemble == "all"
+            or (_panel == "auto" and assessment["complexity"] >= 4)
+        )
+        if want_panel:
+            cap = int(os.getenv("PAL_MISSION_PANEL_MAX", "12"))
+            pmodels = await _panel_models(mtype, cap)
+            if len(pmodels) >= min_models:
+                pjudge = (
+                    judge
+                    or _pick(_rank_for_role("reviewer", _all_available_models()))
+                    or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
+                )
+                res = await run_panel(goal, pmodels, pjudge, full)
+                res["assessment"] = assessment
+                return res
 
     used: set[str] = set()
     writer = writer or _pick(_writer_pool(mtype))
