@@ -260,3 +260,12 @@ def test_extra_chain_respects_max_attempts(monkeypatch):
     with pytest.raises(RuntimeError):
         fc.call_with_fallback(call, "some/random-model", extra_chain=["a", "b", "c"])
     assert calls == ["some/random-model", "a"]  # capped at 2 total
+
+
+def test_should_fallback_on_dead_model_400():
+    """A 400 that means the model id doesn't exist must skip to the next peer;
+    a generic 400 must NOT trigger fallback."""
+    assert fc.should_fallback(400, "Error code: 400 - model_not_found") is True
+    assert fc.should_fallback(400, "The model does not exist") is True
+    assert fc.should_fallback(400, "bad request: missing required field") is False
+    assert fc.should_fallback(None, "unknown model foo-bar") is True

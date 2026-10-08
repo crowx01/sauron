@@ -374,3 +374,50 @@ def test_run_panel_synthesizes_and_records_contributors(monkeypatch):
     assert res["synthesis"] == "UNIFIED RESULT"
     assert "m1" in res["contributors"] and "m2" in res["contributors"]
     assert res["status"] == "COMPLETE"
+
+
+def test_gate_verdict_affirms_on_passing_verify():
+    assert mission._gate_verdict("g", {"files_written": ["/x"], "verify": [{"cmd": "t", "exit": 0, "ok": True}]})["decision"] == "COMPLETE"
+    assert mission._gate_verdict("g", {"files_written": [], "results": [], "verify": []})["decision"] == "CONTINUE"
+
+
+def test_run_panel_survives_judge_crash(monkeypatch):
+    """A dead judge model must not crash a mission whose verify already passed —
+    the deterministic verdict carries it to COMPLETE."""
+    def fake_generate(model, prompt, system, **kw):
+        if "decomposer" in (system or "").lower():
+            return _resp(json.dumps({"subtasks": ["a"]}))
+        if "SYNTHESIZER" in (system or ""):
+            return _resp("MERGED")
+        if "JUDGE" in (system or ""):
+            raise RuntimeError("Error code: 400 - model_not_found")
+        return _resp(json.dumps({"files": [], "commands": []}))
+
+    async def fake_execute(plan, executor, full, goal=""):
+        return {"files_written": ["/x"], "edits_applied": [], "results": [], "verify": [{"cmd": "t", "exit": 0, "ok": True}]}
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr(mission, "_execute_plan", fake_execute)
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
+    res = asyncio.run(mission.run_panel("goal", ["m1", "m2"], "deadjudge", True))
+    assert res["status"] == "COMPLETE"
+
+
+def test_run_panel_survives_decompose_crash(monkeypatch):
+    def fake_generate(model, prompt, system, **kw):
+        if "decomposer" in (system or "").lower():
+            raise RuntimeError("boom")
+        if "SYNTHESIZER" in (system or ""):
+            return _resp("M")
+        if "JUDGE" in (system or ""):
+            return _resp(json.dumps({"decision": "COMPLETE"}))
+        return _resp(json.dumps({"files": [], "commands": []}))
+
+    async def fake_execute(plan, executor, full, goal=""):
+        return {"files_written": ["/x"], "edits_applied": [], "results": [], "verify": [{"cmd": "t", "exit": 0, "ok": True}]}
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr(mission, "_execute_plan", fake_execute)
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0] if models else None)
+    res = asyncio.run(mission.run_panel("goal", ["m1"], "j", True))
+    assert res["status"] == "COMPLETE" and res["subtasks"] == ["goal"]
