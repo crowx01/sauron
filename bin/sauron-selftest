@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# sauron-selftest - validates the installer repo without network / without
+# touching ~/.claude or ~/.cursor. Run from the repo root or from anywhere;
+# it resolves its own location. Non-zero exit on any failure.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'
+YLW=$'\033[33m'; CYN=$'\033[36m'; RST=$'\033[0m'
+
+pass_count=0
+fail_count=0
+pass() { printf '  %s✓%s %s\n' "$GRN" "$RST" "$*"; pass_count=$((pass_count+1)); }
+fail() { printf '  %s✗%s %s\n' "$RED" "$RST" "$*" >&2; fail_count=$((fail_count+1)); }
+step() { printf '\n%s%s╺╸%s %s\n' "$BOLD" "$CYN" "$RST" "$*"; }
+
+# --- 1. syntax of every shipped script (shebang-driven) ---
+step "script syntax"
+check_script_syntax() {
+  local f="$1" shebang rel
+  rel="${f#"$ROOT"/}"
+  [ -z "$rel" ] && rel="$(basename "$f")"
+  shebang=$(head -n 1 -- "$f" 2>/dev/null)
+  case "$shebang" in
+    "#!"*bash*|"#!"*sh)
+      if bash -n -- "$f" 2>/tmp/sauron-selftest.err; then
+        pass "bash syntax: $rel"
+      else
+        fail "bash syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
+      fi ;;
+    "#!"*python*)
+      if command -v python3 >/dev/null 2>&1; then
+        # py_compile without side effects: write bytecode to a temp dir we throw away.
+        local _pyc_tmp; _pyc_tmp=$(mktemp -d)
+        if PYTHONPYCACHEPREFIX="$_pyc_tmp" python3 -m py_compile "$f" 2>/tmp/sauron-selftest.err; then
+          pass "python syntax: $rel"
+        else
+          fail "python syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
+        fi
+        rm -rf "$_pyc_tmp"
+      else
+        printf '  %s!%s python3 not installed; skipping %s\n' "$YLW" "$RST" "$rel"
+      fi ;;
+    "#!"*node*)
+      if command -v node >/dev/null 2>&1; then
+        if node --check "$f" 2>/tmp/sauron-selftest.err; then
+          pass "node syntax: $rel"
+        else
+          fail "node syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
+        fi
+      fi ;;
+    *)
+      printf '  %s!%s unknown shebang, skipping: %s\n' "$YLW" "$RST" "$rel" ;;
+  esac
+}
+while IFS= read -r -d '' f; do
+  check_script_syntax "$f"
+done < <(find "$ROOT/bin" "$ROOT/skills" -type f \( -name "*.sh" -o -name "sauron-selftest" -o -name "sauron-normalize" -o -name "strip-noise" \) -not -path "*/.git/*" -print0)
+[ -f "$ROOT/setup.sh" ] && check_script_syntax "$ROOT/setup.sh"
+
+# --- 2. node syntax of the CLI ---
+step "node syntax"
+if command -v node >/dev/null 2>&1; then
+  if node --check "$ROOT/bin/cli.js" 2>/tmp/sauron-selftest.err; then
+    pass "node --check bin/cli.js"
+  else
+    fail "bin/cli.js: $(cat /tmp/sauron-selftest.err)"
+  fi
+else
+  printf '  %s!%s node not installed; skipping cli.js check\n' "$YLW" "$RST"
+fi
+
+# --- 3. every skill has a SKILL.md with required frontmatter ---
+step "skill frontmatter"
+shopt -s nullglob
+for d in "$ROOT"/skills/*/; do
+  name=$(basename "$d")
+  md="$d/SKILL.md"
+  if [ ! -f "$md" ]; then
+    fail "$name: missing SKILL.md"; continue
+  fi
+  # YAML frontmatter must open on line 1 with `---` and close with `---`.
+  if ! awk 'NR==1{ok=($0=="---")} END{exit !ok}' "$md"; then
+    fail "$name: SKILL.md must open with '---' on line 1"; continue
+  fi
+  if ! awk 'NR==1{next} /^---$/{found=1; exit} END{exit !found}' "$md"; then
+    fail "$name: SKILL.md has no closing '---' for frontmatter"; continue
+  fi
+  # Required keys: name, description.
+  missing=""
+  for key in name description; do
+    if ! awk -v k="$key" '
+      NR==1{next}
+      /^---$/{exit}
+      $0 ~ "^"k":" {found=1}
+      END{exit !found}' "$md"; then
+      missing+=" $key"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    fail "$name: SKILL.md frontmatter missing:$missing"
+  else
+    pass "$name: SKILL.md frontmatter ok"
+  fi
+done
+shopt -u nullglob
+
+# --- 4. settings.example.json is valid JSON ---
+step "json validity"
+if command -v jq >/dev/null 2>&1; then
+  if jq empty "$ROOT/settings.example.json" 2>/tmp/sauron-selftest.err; then
+    pass "settings.example.json parses"
+  else
+    fail "settings.example.json: $(cat /tmp/sauron-selftest.err)"
+  fi
+  if jq empty "$ROOT/package.json" 2>/tmp/sauron-selftest.err; then
+    pass "package.json parses"
+  else
+    fail "package.json: $(cat /tmp/sauron-selftest.err)"
+  fi
+else
+  printf '  %s!%s jq not installed; skipping JSON validity\n' "$YLW" "$RST"
+fi
+
+# --- 5. setup.sh --help runs without error (no network, no file writes) ---
+step "setup.sh --help"
+if bash "$ROOT/setup.sh" --help >/tmp/sauron-selftest.out 2>&1; then
+  pass "setup.sh --help exits 0"
+else
+  fail "setup.sh --help: $(cat /tmp/sauron-selftest.out)"
+fi
+
+# --- 6. cli.js --help ---
+step "cli.js --help"
+if command -v node >/dev/null 2>&1; then
+  if node "$ROOT/bin/cli.js" --help >/tmp/sauron-selftest.out 2>&1; then
+    pass "node bin/cli.js --help exits 0"
+  else
+    fail "node bin/cli.js --help: $(cat /tmp/sauron-selftest.out)"
+  fi
+fi
+
+# --- 7. path-safety doctrine presence: kali-exec must document the key rules ---
+step "doctrine coverage"
+KE="$ROOT/skills/kali-exec/SKILL.md"
+RC="$ROOT/skills/recovery/SKILL.md"
+for pair in \
+  "$KE:absolute path" \
+  "$KE:PEP 668" \
+  "$KE:capability" \
+  "$KE:--break-system-packages" \
+  "$RC:classify" \
+  "$RC:escalation" \
+  "$RC:budget" \
+  "$RC:verify" \
+; do
+  file="${pair%%:*}"; needle="${pair##*:}"
+  if [ -f "$file" ] && grep -qiF -- "$needle" "$file"; then
+    pass "$(basename "$(dirname "$file")") covers '$needle'"
+  else
+    fail "$(basename "$(dirname "$file")") missing '$needle'"
+  fi
+done
+
+# --- summary ---
+printf '\n%s%s╺╸%s summary: %s%d passed%s, %s%d failed%s\n' \
+  "$BOLD" "$CYN" "$RST" "$GRN" "$pass_count" "$RST" \
+  "$([ "$fail_count" -gt 0 ] && printf '%s' "$RED" || printf '%s' "$DIM")" \
+  "$fail_count" "$RST"
+
+[ "$fail_count" -eq 0 ]

@@ -288,6 +288,33 @@
       "default_reasoning_effort": "high",
       "allow_code_generation": true,
       "temperature_constraint": "fixed"
+    },
+    {
+      "model_name": "gpt-5.1-codex-mini",
+      "friendly_name": "OpenAI (GPT-5.1 Codex mini)",
+      "aliases": [
+        "codex-mini",
+        "gpt5.1-codex-mini",
+        "gpt-5.1-codex-mini",
+        "gpt5.1codex-mini",
+        "codex-5.1-mini"
+      ],
+      "intelligence_score": 17,
+      "description": "GPT-5.1 Codex mini (400K context, 128K output) - lighter, streaming-capable variant of GPT-5.1 Codex for interactive coding.",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "supports_extended_thinking": true,
+      "supports_system_prompts": true,
+      "supports_streaming": true,
+      "supports_function_calling": true,
+      "supports_json_mode": true,
+      "supports_images": true,
+      "supports_temperature": true,
+      "max_image_size_mb": 20.0,
+      "use_openai_response_api": true,
+      "default_reasoning_effort": "medium",
+      "allow_code_generation": true,
+      "temperature_constraint": "fixed"
     }
   ]
 }

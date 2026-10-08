@@ -51,6 +51,7 @@ ${BOLD}sauron setup${RST}
   ./setup.sh list            list shipped + pentesting-skills
   ./setup.sh sync            re-sync pentesting-skills + shipped skills (no prompts)
   ./setup.sh reset           clear installation checkpoint
+  ./setup.sh selftest        validate shipped files (no network, no writes)
   ./setup.sh --help          this help
 
 Environment:
@@ -104,6 +105,31 @@ install_pentesting_skills_into() {
   ok "installed $count pentesting-skills → $dst"
 }
 
+# Read SKILL.md description, following folded (`>-`) and literal (`|`) block
+# scalars so cmd_list prints a sentence instead of the YAML marker.
+_skill_desc() {
+  local md="$1"
+  awk '
+    BEGIN { in_fm = 0 }
+    NR == 1 && $0 == "---" { in_fm = 1; next }
+    in_fm && $0 == "---"   { exit }
+    !in_fm { next }
+    /^description:[[:space:]]*$/ { folded = 1; next }
+    /^description:[[:space:]]*[>|][-+]?[[:space:]]*$/ { folded = 1; next }
+    /^description:/ {
+      sub(/^description:[[:space:]]*/, "")
+      print; exit
+    }
+    folded {
+      if ($0 ~ /^[^[:space:]]/) exit
+      sub(/^[[:space:]]+/, "")
+      if ($0 == "") next
+      acc = (acc == "" ? $0 : acc " " $0)
+    }
+    END { if (acc != "") print acc }
+  ' "$md" | head -c 120
+}
+
 cmd_list() {
   step "shipped skills"
   local d name desc
@@ -111,7 +137,7 @@ cmd_list() {
     [ -d "$d" ] || continue
     name=$(basename "$d")
     desc=""
-    [ -f "$d/SKILL.md" ] && desc=$(awk -F': ' '/^description:/ {sub(/^description: */,""); print; exit}' "$d/SKILL.md" | head -c 120)
+    [ -f "$d/SKILL.md" ] && desc=$(_skill_desc "$d/SKILL.md")
     printf '  %s%s%s  %s%s%s\n' "$BOLD" "$name" "$RST" "$DIM" "$desc" "$RST"
   done
   if [ -d "$PENTEST_CACHE" ]; then
@@ -122,7 +148,7 @@ cmd_list() {
       [ -d "$d" ] || continue
       [ -f "$d/SKILL.md" ] || continue
       name=$(basename "$d")
-      desc=$(awk -F': ' '/^description:/ {sub(/^description: */,""); print; exit}' "$d/SKILL.md" | head -c 120)
+      desc=$(_skill_desc "$d/SKILL.md")
       printf '  %s%s%s  %s%s%s\n' "$BOLD" "$name" "$RST" "$DIM" "$desc" "$RST"
     done
   else
@@ -170,6 +196,7 @@ case "${1:-}" in
   list)  cmd_list; exit 0 ;;
   sync)  cmd_sync; exit 0 ;;
   reset) state_clear; ok "checkpoint cleared"; exit 0 ;;
+  selftest) exec bash "$BIN_DIR/sauron-selftest" ;;
 esac
 
 print_banner
@@ -237,12 +264,15 @@ else
     "caveman            full compression, byte-exact evidence"
     "pentesting-agent   offensive-security playbooks"
     "validator          preload skeptical QA reviewer"
+    "kali-exec          Kali/Linux exec doctrine (paths, PEP 668, capability-first)"
+    "recovery           failure classification + escalation chain (replaces blind retry)"
   )
-  multiselect SKILL_FLAGS "1,1,1" "${SKILL_LABELS[@]}"
+  multiselect SKILL_FLAGS "1,1,1,1,1" "${SKILL_LABELS[@]}"
   state_set skills_val "$SKILL_FLAGS"; state_mark skills_pick
 fi
 read -r -a _SF <<< "$SKILL_FLAGS"
 S_CAVE=${_SF[0]:-0}; S_PENT=${_SF[1]:-0}; S_VALI=${_SF[2]:-0}
+S_KEXE=${_SF[3]:-0}; S_RECO=${_SF[4]:-0}
 
 # ---------- 3. models ----------
 if state_done models_pick && [ -n "$(state_get models_val)" ]; then
@@ -264,7 +294,7 @@ read -r -a _MF <<< "$MODEL_FLAGS"
 M_GROQ=${_MF[0]:-0}; M_NEMO=${_MF[1]:-0}; M_GROK=${_MF[2]:-0}
 M_FLSH=${_MF[3]:-0}; M_ORFR=${_MF[4]:-0}; M_PRO=${_MF[5]:-0}
 
-if [ "$S_CAVE$S_PENT$S_VALI" = "000" ] && [ "$M_GROQ$M_NEMO$M_GROK$M_FLSH$M_ORFR$M_PRO" = "000000" ]; then
+if [ "$S_CAVE$S_PENT$S_VALI$S_KEXE$S_RECO" = "00000" ] && [ "$M_GROQ$M_NEMO$M_GROK$M_FLSH$M_ORFR$M_PRO" = "000000" ]; then
   warn "you selected no skills and no models; the hook would be inert."
   read -rp "  proceed anyway? [y/N]: " a
   [[ "${a:-n}" =~ ^[yY]$ ]] || { err "aborted"; exit 1; }
@@ -284,6 +314,8 @@ SKILLS_LIST=""
 [ "$S_CAVE" = 1 ] && SKILLS_LIST+="\`caveman\` (full mode), "
 [ "$S_PENT" = 1 ] && SKILLS_LIST+="\`pentesting-agent\`, "
 [ "$S_VALI" = 1 ] && SKILLS_LIST+="\`validator\` (preload), "
+[ "$S_KEXE" = 1 ] && SKILLS_LIST+="\`kali-exec\` (exec doctrine), "
+[ "$S_RECO" = 1 ] && SKILLS_LIST+="\`recovery\` (escalation chain), "
 SKILLS_LIST="${SKILLS_LIST%, }"
 
 if [ -n "$SKILLS_LIST" ]; then
@@ -291,7 +323,7 @@ if [ -n "$SKILLS_LIST" ]; then
 else
   SS_TEXT="Doctrine + routing map are in CLAUDE.md at the project root (already loaded)."
 fi
-UPS_TEXT="Every message: Claude PLANS and decides only — it does NOT execute. Route ALL execution to the PAL engine (bulk read/extract to nemotron/flash, write/validate to groq, tool loops/recon/scans/edits to the tool-capable model pool, per CLAUDE.md routing); pre-filter recon output locally first ($BIN_DIR/sauron-normalize, $BIN_DIR/strip-noise). Keep ONLY planning, decisions, severity/safety judgments and side-effect approval in Claude to save tokens; everything else runs on engine models. Failover on refusal, never stop."
+UPS_TEXT="Every message: Claude PLANS and decides only — it does NOT execute. Route ALL execution to the PAL engine (bulk read/extract to nemotron/flash, write/validate to groq, tool loops/recon/scans/edits to the tool-capable model pool, per CLAUDE.md routing); pre-filter recon output locally first ($BIN_DIR/sauron-normalize, $BIN_DIR/strip-noise). Keep ONLY planning, decisions, severity/safety judgments and side-effect approval in Claude to save tokens; everything else runs on engine models. Every Bash call PAL emits: absolute paths only, no cd persistence between calls, PEP 668 means pipx/venv/apt not --break-system-packages, capability-first before install (command -v, python3 -c 'import X'). On any non-zero exit or model refusal: classify error_class, route per the recovery skill, never blind-retry the same (command, cwd) tuple. Failover on refusal, never stop."
 
 # ---------- 4. render settings.json ----------
 build_cmd () {
@@ -436,6 +468,52 @@ D. Synthesize with confidence markers; groq drafts the report, Claude spot-check
 - Recon tool output → $BIN_DIR/sauron-normalize + $BIN_DIR/strip-noise before context.
 - Any tool output over 5 KB routes through nemotron (bulk) or flash (structured).
 - Batch related PAL sub-tasks into one structured call.
+
+## Shell execution doctrine (see \`kali-exec\` skill)
+- Every Bash call starts a NEW shell: a prior \`cd\` does NOT persist to the
+  next call. Always resolve paths to absolute up front.
+- Expand \`~\` and \`\$HOME\` yourself; never emit \`cd ~/foo\` as its own call.
+  Use subshells when a cwd is unavoidable:
+  \`( cd -- "\$HOME/dir" && cmd )\`.
+- Verify files exist before \`chmod/rm/mv/cp\`; surface mismatches instead
+  of silently creating state.
+- Quote every path; prefer \`--\` to separate options from paths.
+
+## Python environment doctrine (PEP 668)
+Kali is PEP 668 externally-managed. \`pip install X\` on the system
+interpreter is blocked by design. Decision ladder:
+1. \`python3 -c "import X"\` — already present → use it.
+2. \`apt-cache show python3-X\` exists → \`apt-get install -y python3-X\`.
+3. CLI tool (binary entry point) → \`pipx install X\`.
+4. Project context → create/reuse \`<project>/.venv\` and use its python.
+5. Ad-hoc → \`\$XDG_DATA_HOME/sauron/venvs/<task>/\`.
+6. \`--break-system-packages\` is a last resort, only after \`recovery\`
+   has escalated and the user explicitly approved.
+
+## Capability-first (see \`kali-exec\`)
+Before ANY install/clone/download, probe:
+\`command -v <tool>\`, \`python3 -c 'import <mod>'\`, \`ls /opt/<tool>\`,
+\`dpkg -L kali-tools-top10 | grep <tool>\`, the PAL toolbelt at
+\`~/.pal/toolbelt.json\`, and shipped skill scripts under
+\`~/.claude/skills/*/scripts/\`. If present, USE it; do not reinstall a
+capability that already exists.
+
+## Error handling doctrine (see \`recovery\` skill)
+Every tool call ends with a structured result including
+\`{command, cwd, exit, stdout_tail, stderr_tail, error_class, env_fingerprint}\`.
+On non-zero exit or model refusal:
+1. CLASSIFY — assign \`error_class\` deterministically.
+2. DIAGNOSE — one model proposes a cause + action (per the pal-router
+   error-class table).
+3. INDEPENDENT RECHECK — a DIFFERENT model sees the same packet. If both
+   agree, apply; if not, escalate to \`pro\` via \`mcp__pal__challenge\`.
+4. APPLY — one action.
+5. VERIFY — a deterministic check (test -f, python3 -c "import X" with the
+   intended interpreter, exit-code grep). Never trust the model's self-report.
+Budgets: at most 2 runs of an identical \`(command, cwd, stderr-fp)\` tuple;
+at most 4 recovery cycles per \`error_class\`; at most 12 total cycles per
+task; a 10-minute wall-clock default. Beyond budget: stop with the full
+structured state so the user can resume. \`INCOMPLETE\` is never silent.
 
 ## Preloaded skills
 ${SKILLS_LIST:-(none preloaded; all skills lazy-load on trigger phrase)}

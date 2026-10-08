@@ -106,6 +106,73 @@ These two hooks are the only place doctrine can drift; catalog capability filter
 - Never inline a long payload into a groq prompt if it exceeds 8,000 tokens; chunk it.
 - Never trust nemotron to produce byte-exact structured output.
 - Never treat a refusal as the end of the task; re-route.
+- Never ask the SAME model to "try again" after a refusal or malformed output; that is a routing hole, not a retry. See the `recovery` skill.
+
+## Error-class → model routing
+
+When the `kali-exec` or `recovery` skills surface an `error_class`, use this
+table to pick the diagnose model. The independent-recheck node must pick a
+**different** model from the same row's fallback column.
+
+| `error_class`             | Diagnose           | Independent recheck | Escalation (if they disagree) |
+|---------------------------|--------------------|---------------------|-------------------------------|
+| `transient`               | none (retry once)  | n/a                 | groq                          |
+| `missing_file`            | groq               | grok                | pro                           |
+| `wrong_cwd`               | deterministic      | n/a                 | groq                          |
+| `missing_binary`          | groq               | grok                | pro                           |
+| `missing_python_dep`      | groq               | grok                | pro                           |
+| `pep668_blocked`          | groq               | flash               | pro                           |
+| `permission_denied`       | groq               | grok                | pro                           |
+| `invalid_argument`        | flash              | groq                | pro                           |
+| `timeout`                 | grok               | groq                | pro                           |
+| `oom`                     | pro                | grok                | user                          |
+| `model_refusal`           | **route around**   | grok → or-free      | user if everyone refuses      |
+| `model_hallucinated_tool` | flash              | groq                | pro                           |
+| `rate_limit_402`          | queue + swap       | n/a                 | or-free / grok                |
+| `context_overflow`        | nemotron (compress)| flash               | pro                           |
+| `parser_failure`          | flash              | groq                | pro                           |
+| `unknown`                 | pro                | grok                | user                          |
+
+## Per-task failure memory
+
+Within a single task, keep an in-context tally:
+
+```json
+{
+  "model_failures": {
+    "flash":    { "refused":  ["recon_log_summary"],              "429": 0 },
+    "groq":     { "truncated":["long_json_schema"],               "429": 2 },
+    "nemotron": { "hallucinated":["strict_structured_extract"],   "429": 0 }
+  }
+}
+```
+
+Rules:
+
+1. A model that **refused** a task-class this task **does not** receive the
+   same task-class again — route straight to the next model in its row.
+2. A model that **hallucinated** structured output this task is **blocked**
+   from strict structured extraction for the rest of the task; use `flash`
+   or deterministic parsers instead.
+3. Rate-limit (`429`, `402`) is **transient per model, not per task**:
+   swap for 60 s, then allow re-use.
+4. **Do not** permanently blacklist a model across runs from a single
+   transient. The memory lives in task state, not in a global file.
+
+## Capability-first before any PAL install call
+
+`pal-router` is for **routing**, not for installing. Before delegating a
+"please install X" task, the orchestrator must first ask (via the
+`kali-exec` capability probes):
+
+- Is X already a binary on PATH?
+- Is X already an importable Python module in the current interpreter?
+- Is X already present in a project `.venv`?
+- Is X already a PAL toolbelt entry?
+
+If any answer is yes, use it and stop; do **not** ask any model to plan an
+install. "Delegate the prose, never the evidence" — and never the install
+decision for a tool we already have.
 
 ## Token efficiency rules
 
