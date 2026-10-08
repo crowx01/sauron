@@ -26,7 +26,9 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
+import time
 
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -90,6 +92,9 @@ class _ReplState:
         self.perm = perm if perm in _PERM_MODES else "auto"
         self.model = model
         self.cwd = cwd
+        self.ctx_pct = 0      # % of context window used (F2)
+        self.queued = 0       # messages queued while a turn runs (F4)
+        self.busy = False     # a turn is in flight (F4/F5)
 
     def cycle_perm(self) -> None:
         self.perm = _PERM_MODES[(_PERM_MODES.index(self.perm) + 1) % len(_PERM_MODES)]
@@ -115,10 +120,73 @@ if _PT_OK:
                 if cmd.startswith(text):
                     yield Completion(cmd, start_position=-len(text), display=cmd)
 
+    class _AtFileCompleter(Completer):
+        """Autocomplete file paths when the current word starts with '@' (F3)."""
+
+        _SKIP = {".git", "node_modules", "__pycache__", ".venv", ".sauron_venv",
+                 ".mypy_cache", ".pytest_cache", "dist", "build"}
+
+        def _files(self, root: str, cap: int = 400):
+            import os as _os
+
+            out = []
+            for dp, dn, fn in _os.walk(root):
+                dn[:] = [d for d in dn if d not in self._SKIP and not d.startswith(".")]
+                for f in fn:
+                    rel = _os.path.relpath(_os.path.join(dp, f), root)
+                    out.append(rel)
+                    if len(out) >= cap:
+                        return out
+            return out
+
+        def get_completions(self, document, complete_event):
+            word = document.get_word_before_cursor(pattern=re.compile(r"@[^\s]*"))
+            if not word.startswith("@"):
+                return
+            needle = word[1:].lower()
+            for rel in self._files(os.getcwd()):
+                if needle in rel.lower():
+                    yield Completion("@" + rel, start_position=-len(word),
+                                     display=rel)
+
+    class _ChatCompleter(Completer):
+        """Dispatch to the slash or @file completer by the current word (F3)."""
+
+        def __init__(self):
+            self._slash = _SlashCompleter()
+            self._at = _AtFileCompleter()
+
+        def get_completions(self, document, complete_event):
+            before = document.text_before_cursor
+            if before.lstrip().startswith("/") and " " not in before.strip():
+                yield from self._slash.get_completions(document, complete_event)
+            if "@" in before.split(" ")[-1]:
+                yield from self._at.get_completions(document, complete_event)
+
 
 def _print_tool(name, args, res) -> None:
     """Minimal monochrome tool trace: '⏺ tool(args)' then an indented '⎿ result'
-    (both dim; the accent marker is the only colour, red only on error)."""
+    (both dim; the accent marker is the only colour, red only on error).
+    File edits render a Claude-style colored unified diff instead (F1)."""
+    try:
+        if isinstance(args, dict) and (
+            (name or "").lower() in _EDIT_TOOLS
+            or "diff" in args or ("old_str" in args and "new_str" in args)
+            or ("before" in args and "after" in args)
+        ):
+            path = args.get("path") or args.get("file") or args.get("file_path") or name
+            if args.get("diff"):
+                console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _CC_DIM)))
+                console.print(_answer_block(_colorize_diff(str(args["diff"])),
+                                            marker="⎿", marker_style=_CC_DIM))
+                return
+            before = args.get("before", args.get("old_str", ""))
+            after = args.get("after", args.get("new_str", ""))
+            if before or after:
+                _render_diff(str(path), str(before), str(after))
+                return
+    except Exception:  # noqa: BLE001 - never let diff rendering break the trace
+        pass
     shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args, default=str)
     console.print(Text.assemble(("⏺ ", _ACCENT), (f"{name}(", "dim"), (str(shown)[:100], "dim"), (")", "dim")))
     lines = str(res).strip().splitlines() or [""]
@@ -133,6 +201,74 @@ def _print_tool(name, args, res) -> None:
 def _render_tools(transcript) -> None:
     for name, args, res in transcript:
         _print_tool(name, args, res)
+
+
+# ---- Claude-style extras: cancel (F5), diff render (F1), context % (F2) -----
+import threading as _threading
+
+_CANCEL = _threading.Event()  # set to interrupt the in-flight turn (Esc / F5)
+
+
+class _Interrupted(Exception):
+    """Raised cooperatively mid-stream when the user interrupts (Esc)."""
+
+
+_EDIT_TOOLS = {"edit", "write", "str_replace", "apply_patch", "update_file",
+               "create_file", "write_file", "multiedit", "str_replace_editor"}
+
+
+def _colorize_diff(diff: str, *, limit: int = 40):
+    """Colorize a unified-diff string: + green, - red, @@ cyan, context dim."""
+    out = Text()
+    lines = diff.splitlines()
+    for ln in lines[:limit]:
+        if ln.startswith("+") and not ln.startswith("+++"):
+            out.append(ln + "\n", style="green")
+        elif ln.startswith("-") and not ln.startswith("---"):
+            out.append(ln + "\n", style="red")
+        elif ln.startswith("@@"):
+            out.append(ln + "\n", style="cyan")
+        else:
+            out.append(ln + "\n", style=_CC_DIM)
+    if len(lines) > limit:
+        out.append(f"… (+{len(lines) - limit} more)", style=_CC_DIM)
+    return out
+
+
+def _render_diff(path: str, before: str, after: str) -> None:
+    """Claude-style edit header + colored unified diff under a '⎿' gutter."""
+    import difflib
+
+    console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _CC_DIM)))
+    diff = "\n".join(difflib.unified_diff(
+        (before or "").splitlines(), (after or "").splitlines(), lineterm="", n=2,
+    ))
+    if not diff.strip():
+        console.print(Text("  ⎿ (no changes)", style=_CC_DIM))
+        return
+    console.print(_answer_block(_colorize_diff(diff), marker="⎿", marker_style=_CC_DIM))
+
+
+_CTX_WINDOW_DEFAULT = int(os.getenv("PAL_CHAT_CTX_WINDOW", "128000"))
+
+
+def _context_pct(history, model: str = "") -> int:
+    """Rough % of the context window used by the rolling history (~4 chars/token)."""
+    try:
+        used = len(_ctx_render(history)) // 4
+        return max(0, min(99, round(used / max(1, _CTX_WINDOW_DEFAULT) * 100)))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _footer_extra(state) -> str:
+    """Footer suffix: '(N queued)' (F4) and 'N% ctx' (F2), when non-zero."""
+    bits = []
+    if getattr(state, "queued", 0):
+        bits.append(f"({state.queued} queued)")
+    if getattr(state, "ctx_pct", 0):
+        bits.append(f"{state.ctx_pct}% ctx")
+    return ("  ·  " + "  ·  ".join(bits)) if bits else ""
 
 
 # one specific role (system instruction) per command, so each behaves for its job
@@ -692,7 +828,7 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
 # Claude-Code-like restraint: default foreground for the assistant's words,
 # dim/grey for everything secondary (tool trace, notices, meta), one muted
 # accent reserved for the prompt marker and logo, red only for errors.
-_ACCENT = "#c8762f"  # single muted brand accent; used sparingly
+_ACCENT = "#d77757"  # Claude Code brand terracotta (extracted from the CLI)
 
 
 def _note(msg: str, kind: str = "sys") -> None:
@@ -701,6 +837,36 @@ def _note(msg: str, kind: str = "sys") -> None:
         console.print(f"[red]✗ {msg}[/]")
     else:
         console.print(f"[dim]{msg}[/]")
+
+
+def _echo_user(line: str) -> None:
+    """Echo the submitted message as Claude Code does: a full-width highlighted
+    bar ('❯ <msg>' on a dim background), then a blank line before the answer.
+    (The input box is erased on submit, so the turn needs its own record of
+    what was asked.)"""
+    width = console.width or 80
+    for i, part in enumerate(line.split("\n")):
+        body = f"{'❯' if i == 0 else ' '} {part}"
+        row = Text.assemble(
+            (f"{'❯' if i == 0 else ' '} ", "#6e6e6e"), (part, "bold"),
+        )
+        row.pad_right(max(0, width - len(body)))  # fill the row edge-to-edge
+        console.print(row, style="on #2a2a2a")    # full-width highlight bar
+    console.print()                                # blank line, like Claude
+
+
+_DONE_VERBS = ("Cooked", "Routed", "Herded", "Brewed", "Forged", "Wrangled")
+
+
+def _done_footer(t0: float) -> None:
+    """Claude-Code completion line: '✻ Cooked for 2s · done 8:02 PM' (dim)."""
+    import random
+
+    secs = max(0, round(time.monotonic() - t0))
+    stamp = time.strftime("%-I:%M %p") if os.name != "nt" else time.strftime("%I:%M %p")
+    verb = random.choice(_DONE_VERBS)
+    console.print(f"[#6e6e6e]✻ {verb} for {secs}s  ·  done {stamp}[/]")
+    console.print()
 
 
 def _panel(body, title: str, *, glyph: str = "", border: str = "grey42") -> Panel:
@@ -714,12 +880,91 @@ def _panel(body, title: str, *, glyph: str = "", border: str = "grey42") -> Pane
     )
 
 
+_ANSWER_IND = "  "  # 2 cols, the width of the '● ' marker — the hanging indent
+
+
+def _answer_block(renderable, *, marker: str = "●", marker_style: str = _ACCENT):
+    """Wrap an assistant answer so the '●' sits in a 2-col gutter and EVERY line
+    of the body (including wrapped ones) aligns under the first line's text —
+    Claude Code's hanging-indent layout."""
+    from rich.table import Table
+
+    grid = Table.grid(padding=0)
+    grid.add_column(width=2, no_wrap=True)          # marker gutter
+    grid.add_column(overflow="fold")                # body wraps within its column
+    grid.add_row(Text(marker, style=marker_style), renderable)
+    return grid
+
+
+def _answer_renderable(text: str):
+    """The aligned '●' block for a (possibly partial) answer — Markdown when it
+    parses, plain text otherwise (partial markdown never raises)."""
+    try:
+        body = Markdown(text) if text.strip() else Text(text)
+    except Exception:  # noqa: BLE001 - never let a render error break streaming
+        body = Text(text)
+    return _answer_block(body)
+
+
+def _render_answer_ansi(text: str, width: int) -> str:
+    """Render the aligned answer block to ANSI, for the full-screen transcript."""
+    return _render_ansi(_answer_renderable(text), width)
+
+
+def _fmt_tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _elapsed_str(secs: int) -> str:
+    return f"{secs // 60}m{secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+
+
+def _est_tokens(text: str) -> int:
+    """Rough live output-token estimate (~4 chars/token), for the status line."""
+    return max(0, len(text) // 4)
+
+
+_SPIN_FRAMES = ("✶", "✳", "✻", "✽", "✻", "✳")  # pulsing star, like Claude's spinner
+
+
+def _status_line(t0: float, text: str, verb: str, phrase: str | None = None):
+    """Claude's live working line: '✻ Improvising… (53s · ↓ 2.8k tokens · esc to interrupt)'.
+    The spinner glyph pulses (brand accent); the metrics are dim."""
+    if phrase is None:
+        phrase = "esc to interrupt" if _FULLSCREEN_ACTIVE else "still thinking"
+    elapsed = time.monotonic() - t0
+    secs = max(0, int(elapsed))
+    glyph = _SPIN_FRAMES[int(elapsed * 6) % len(_SPIN_FRAMES)]  # ~6 fps animation
+    return Text.assemble(
+        (f"{glyph} {verb}… ", _CC_ACCENT),
+        (f"({_elapsed_str(secs)}  ·  ↓ {_fmt_tokens(_est_tokens(text))} tokens  ·  {phrase})", _CC_DIM),
+    )
+
+
+class _StreamView:
+    """Live renderable for inline streaming: the aligned answer block followed by
+    the ticking working-status line. Recomputes every refresh so the elapsed
+    timer and token counter advance even between model deltas."""
+
+    def __init__(self, buf: list, t0: float, verb: str):
+        self._buf = buf
+        self._t0 = t0
+        self._verb = verb
+
+    def __rich_console__(self, console, options):
+        from rich.console import Group
+
+        text = "".join(self._buf)
+        yield Group(_answer_renderable(text), _status_line(self._t0, text, self._verb))
+
+
 def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = None):
-    """Render an assistant answer plainly — no box, no colour. Errors are red
-    text. (Kept as a function so every call site stays minimal and uniform.)"""
+    """Render an assistant answer with a '●' gutter and hanging-indented body
+    (no box, no border) so every line aligns, like Claude Code. Errors are red."""
     if answer.startswith("__ERROR__"):
-        return Text(answer[len("__ERROR__") :].strip(), style="red")
-    return Markdown(answer)
+        body = Text(answer[len("__ERROR__") :].strip(), style="red")
+        return _answer_block(body, marker_style="red")
+    return _answer_block(Markdown(answer), marker_style=color or _ACCENT)
 
 
 # ---- self-contained in-session conversation context (Phase 3) --------------
@@ -873,8 +1118,11 @@ async def _ask_chat(model: str, prompt: str, history: list[dict], role: str | No
 
 def _stream_on(session) -> bool:
     """Live streaming only on a real interactive session (never for piped /
-    non-TTY callers) and unless disabled with PAL_CHAT_STREAM=0."""
-    return session is not None and os.getenv("PAL_CHAT_STREAM", "1").strip().lower() not in ("0", "false", "off", "no")
+    non-TTY callers) and unless disabled with PAL_CHAT_STREAM=0. The
+    full-screen TUI always counts as interactive."""
+    if os.getenv("PAL_CHAT_STREAM", "1").strip().lower() in ("0", "false", "off", "no"):
+        return False
+    return _FULLSCREEN_ACTIVE or session is not None
 
 
 async def _stream_chat(model: str, prompt: str, history: list[dict], role: str | None = None) -> str:
@@ -888,22 +1136,71 @@ async def _stream_chat(model: str, prompt: str, history: list[dict], role: str |
     preamble = _ctx_render(history)
     full_prompt = f"{preamble}{prompt}" if preamble else prompt
 
-    console.print(Text("⏺ ", style=_ACCENT), end="")  # minimal assistant marker, then stream
+    import random
+
+    ui = _FS_UI  # full-screen: re-render the whole answer in the transcript
     buf: list[str] = []
+    live = None  # inline: a rich Live that re-renders the aligned block in place
+    t0 = time.monotonic()
+    verb = random.choice(_THINK_VERBS)  # the live working verb (Claude-style)
+
+    def _fs_render() -> str:
+        # answer block + the ticking working-status line, as ANSI for the transcript
+        text = "".join(buf)
+        ans = _render_answer_ansi(text, ui.content_width).rstrip("\n")
+        status = _render_ansi(_status_line(t0, text, verb), ui.content_width).rstrip("\n")
+        return ans + "\n" + status
+
+    if ui is not None:
+        ui.begin_live()
+        ui.set_live(_fs_render())  # show the status immediately
+    else:
+        from rich.live import Live
+
+        # auto_refresh ticks the elapsed/token counter even between model deltas.
+        live = Live(_StreamView(buf, t0, verb), console=console,
+                    auto_refresh=True, refresh_per_second=8, transient=False)
+        live.start()
 
     def _on_delta(piece: str) -> None:
+        if _CANCEL.is_set():            # F5: Esc pressed — stop at this token
+            raise _Interrupted()
         buf.append(piece)
-        console.print(piece, end="", highlight=False, soft_wrap=True)
+        # Re-render the growing answer as the aligned '●' block so EVERY line —
+        # including soft-wrapped ones — hangs under the first line's text.
+        if ui is not None:
+            ui.set_live(_fs_render())
+        # inline: auto_refresh picks up the shared buf, no explicit update needed.
 
     try:
         text = await asyncio.to_thread(
             dispatch.generate_stream, model, full_prompt, system,
             temperature=0.3, category="chat", tool="chat", on_delta=_on_delta,
         )
-        console.print()  # close the streamed line
-        return _clean(text or "".join(buf))
+        final = _clean(text or "".join(buf))
+        # Final render DROPS the working-status line — the loop's dim done-footer
+        # then takes over (the orange→dim colour change on completion).
+        if ui is not None:
+            ui.set_live(_render_answer_ansi(final, ui.content_width))
+            ui.end_live()
+        else:
+            live.update(_answer_renderable(final), refresh=True)
+            live.stop()
+        return final
+    except _Interrupted:               # F5: cooperative cancel — keep partial text
+        partial = _clean("".join(buf))
+        if ui is not None:
+            ui.set_live(_render_answer_ansi(partial + "\n[interrupted]", ui.content_width))
+            ui.end_live()
+        elif live is not None:
+            live.update(_answer_renderable(partial + "\n[interrupted]"), refresh=True)
+            live.stop()
+        return partial or "__ERROR__interrupted"
     except Exception as exc:  # noqa: BLE001
-        console.print()
+        if ui is not None:
+            ui.end_live()
+        elif live is not None:
+            live.stop()
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:240]}"
 
 
@@ -1012,7 +1309,7 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
             return None
         return HTML(
             f"<style fg='#888888'>{_PERM_LABEL[state.perm]}  ·  shift+tab  ·  "
-            f"{state.model or 'auto'}</style>"
+            f"{state.model or 'auto'}{_footer_extra(state)}</style>"
         )
 
     return PromptSession(
@@ -1021,10 +1318,52 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
         key_bindings=kb,
         editing_mode=EditingMode.EMACS,
         enable_history_search=False,  # keep plain Up/Down/Ctrl-P/Ctrl-N semantics
-        completer=_SlashCompleter() if _PT_OK else None,
+        completer=_ChatCompleter() if _PT_OK else None,
         complete_while_typing=True,
         bottom_toolbar=_toolbar,
         placeholder=HTML("<style fg='#666666'>Type a message, / for commands…</style>"),
+    )
+
+
+# Real Claude Code theme values (extracted from the installed CLI binary):
+#   brand accent #d77757 · dim grey #6e6e6e · amber #f59e0b · text #f2f3f5
+_CC_ACCENT = "#d77757"
+_CC_DIM = "#6e6e6e"
+_CC_AMBER = "#f59e0b"
+_FS_GUTTER = 2  # left margin between the pane edge and content, like Claude Code
+
+
+def _box_style():
+    """Claude-Code input chrome: thin dim-grey rounded border + dim footer."""
+    from prompt_toolkit.styles import Style
+
+    return Style.from_dict({
+        "input-frame": "",
+        "input-frame frame.border": f"fg:{_CC_DIM} noinherit",  # thin dim-grey box
+        "text-area.prompt": f"fg:{_CC_ACCENT}",                 # the '> ' marker
+    })
+
+
+def _rounded_frame(body):
+    """A prompt_toolkit frame with Claude Code's rounded corners (╭─╮│╰─╯).
+
+    Built from the same Window/VSplit/HSplit primitives prompt_toolkit's own
+    Frame uses — only the six border glyphs differ, because the stock Frame
+    hardcodes square corners and exposes no way to round them."""
+    from functools import partial
+
+    from prompt_toolkit.layout import HSplit, VSplit, Window
+
+    fill = partial(Window, style="class:frame.border")
+    return HSplit(
+        [
+            VSplit([fill(width=1, height=1, char="╭"), fill(char="─"),
+                    fill(width=1, height=1, char="╮")], height=1),
+            VSplit([fill(width=1, char="│"), body, fill(width=1, char="│")]),
+            VSplit([fill(width=1, height=1, char="╰"), fill(char="─"),
+                    fill(width=1, height=1, char="╯")], height=1),
+        ],
+        style="class:input-frame",
     )
 
 
@@ -1037,20 +1376,26 @@ class _BoxedPrompt:
     def __init__(self, session_id: str, state: _ReplState):
         self.state = state
         self.history = chat_history.JsonlSessionHistory(session_id)
-        self.completer = _SlashCompleter() if _PT_OK else None
+        self.completer = _ChatCompleter() if _PT_OK else None
 
     async def prompt_async(self, _message=None, *, _input=None, _output=None) -> str:
         from prompt_toolkit.application import Application
+        from prompt_toolkit.filters import to_filter
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
-        from prompt_toolkit.widgets import Frame, TextArea
+        from prompt_toolkit.layout.dimension import Dimension as D
+        from prompt_toolkit.widgets import TextArea
 
         state = self.state
         ta = TextArea(
             multiline=True, prompt="> ", wrap_lines=True,
+            height=D(min=1), scrollbar=False,
             history=self.history, completer=self.completer, complete_while_typing=True,
         )
+        # Claude-Code-style: the box hugs its content (one line, grows as you
+        # type) instead of the multiline TextArea stretching to fill the screen.
+        ta.window.dont_extend_height = to_filter(True)
         res = {"text": None, "signal": None}
         kb = KeyBindings()
 
@@ -1082,16 +1427,23 @@ class _BoxedPrompt:
             event.app.invalidate()
 
         def _footer():
+            # Claude-Code footer: the mode in the brand accent, rest dim grey.
             return HTML(
-                f"<style fg='#888888'>{_PERM_LABEL[state.perm]}  ·  shift+tab  ·  "
-                f"{state.model or 'auto'}</style>"
+                f"  <style fg='{_CC_ACCENT}'>{_PERM_LABEL[state.perm]}</style>"
+                f"<style fg='{_CC_DIM}'>  ·  shift+tab  ·  {state.model or 'auto'}"
+                f"{_footer_extra(state)}</style>"
             )
 
-        layout = Layout(HSplit([Frame(ta), Window(FormattedTextControl(_footer), height=1)]))
+        # Claude-Code input: rounded thin dim-grey box (not prompt_toolkit's
+        # default bright square frame).
+        layout = Layout(HSplit([
+            _rounded_frame(ta),
+            Window(FormattedTextControl(_footer), height=1),
+        ]))
         app = Application(
             layout=layout, key_bindings=kb, full_screen=False,
             erase_when_done=True, mouse_support=False,
-            input=_input, output=_output,
+            style=_box_style(), input=_input, output=_output,
         )
         if _input is None:  # real terminal: keep scrollback clean
             with patch_stdout():
@@ -1116,6 +1468,270 @@ async def _read_line(session, cwd: str) -> str:
             text = await session.prompt_async([("class:prompt", "> ")])
         return text.strip()
     return (await asyncio.to_thread(console.input, "[dim]>[/] ")).strip()
+
+
+# ---- Claude-Code-style full-screen TUI -------------------------------------
+# A pinned layout on the alternate screen (so the terminal is hidden on launch
+# and restored on exit): banner fixed at the top, the conversation transcript
+# scrolling in the middle, the rounded input box pinned just above a one-line
+# status footer. All of sauron's existing rich output is redirected into the
+# transcript, so every turn-rendering path is reused unchanged.
+_FULLSCREEN_ACTIVE = False
+_FS_UI = None  # the active _FullScreenUI, so streaming can re-render in place
+
+
+def _render_ansi(renderable, width: int) -> str:
+    """Render any rich renderable to an ANSI string at a fixed width."""
+    from io import StringIO
+
+    buf = StringIO()
+    Console(file=buf, force_terminal=True, color_system="truecolor",
+            width=max(20, width), highlight=False).print(renderable)
+    return buf.getvalue()
+
+
+class _FullScreenUI:
+    """Owns the alternate-screen layout and feeds submitted lines to the REPL.
+
+    The REPL keeps its linear ``while`` loop: it awaits :meth:`next` for the
+    next line while this app renders in the background, and every ``console``
+    write lands in the scrolling transcript (see :class:`_CaptureConsole`)."""
+
+    def __init__(self, header_ansi: str, state, footer_cb, content_width: int = 80):
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.filters import to_filter
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.dimension import Dimension as D
+        from prompt_toolkit.widgets import TextArea
+
+        self.state = state
+        self.content_width = content_width
+        self._lines: list[str] = []     # completed transcript lines (ANSI)
+        self._pending = ""              # current partial line (streaming)
+        self._live_start = None         # index where a live (streaming) block begins
+        self._scroll = 0                # lines scrolled up from the bottom (0 = follow)
+        self._footer_cb = footer_cb
+        self._queue: asyncio.Queue = asyncio.Queue()
+
+        header_lines = header_ansi.rstrip("\n").split("\n")
+        self._header_h = len(header_lines)
+
+        self.ta = TextArea(
+            multiline=True, prompt="> ", wrap_lines=True,
+            height=D(min=1), scrollbar=False,
+            completer=_ChatCompleter() if _PT_OK else None,
+            complete_while_typing=True,
+        )
+        self.ta.window.dont_extend_height = to_filter(True)
+
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _(e):
+            txt = self.ta.text
+            self.ta.text = ""
+            self._scroll = 0  # jump back to the bottom on a new turn
+            if txt.strip() and getattr(self.state, "busy", False):
+                self.state.queued += 1  # F4: queued while a turn is running
+            self._queue.put_nowait(("line", txt))
+
+        @kb.add("escape")
+        def _(e):
+            # F5: Esc interrupts an in-flight turn; it does nothing when idle
+            # (so normal editing/escape sequences aren't hijacked).
+            if getattr(self.state, "busy", False):
+                _CANCEL.set()
+                e.app.invalidate()
+
+        @kb.add("pageup")
+        def _(e):
+            self._scroll += max(1, self._vis_height() - 1)
+            self._clamp_scroll()
+            e.app.invalidate()
+
+        @kb.add("pagedown")
+        def _(e):
+            self._scroll -= max(1, self._vis_height() - 1)
+            self._clamp_scroll()
+            e.app.invalidate()
+
+        # Mouse wheel (via alternate-scroll → arrow keys) scrolls the transcript
+        # when you're not editing, so native copy keeps working. With text in
+        # the box, Up/Down fall through to normal cursor/history navigation.
+        from prompt_toolkit.filters import Condition as _Cond
+
+        _idle = _Cond(lambda: not self.ta.text.strip())
+
+        @kb.add("up", filter=_idle)
+        def _(e):
+            self._scroll += 3
+            self._clamp_scroll()
+            e.app.invalidate()
+
+        @kb.add("down", filter=_idle)
+        def _(e):
+            self._scroll -= 3
+            self._clamp_scroll()
+            e.app.invalidate()
+
+        @kb.add("escape", "enter")
+        @kb.add("c-j")
+        def _(e):
+            self.ta.buffer.insert_text("\n")
+
+        @kb.add("c-c")
+        def _(e):
+            self._queue.put_nowait(("sig", "int"))
+
+        @kb.add("c-d")
+        def _(e):
+            if not self.ta.text:
+                self._queue.put_nowait(("sig", "eof"))
+
+        @kb.add("s-tab")
+        @kb.add("escape", "[", "Z")
+        def _(e):
+            self.state.cycle_perm()
+            e.app.invalidate()
+
+        ui_self = self
+
+        class _ScrollFTC(FormattedTextControl):
+            """FormattedTextControl that routes wheel events to the transcript
+            scroll (FormattedTextControl has no mouse_handler kwarg)."""
+
+            def mouse_handler(self, mouse_event):
+                res = ui_self._on_mouse(mouse_event)
+                if res is NotImplemented:
+                    return super().mouse_handler(mouse_event)
+                return res
+
+        self._twin = Window(
+            _ScrollFTC(self._transcript_text),
+            wrap_lines=False, always_hide_cursor=True,
+        )
+        header_win = Window(FormattedTextControl(lambda: ANSI(header_ansi)),
+                            height=self._header_h)
+        footer_win = Window(FormattedTextControl(lambda: self._footer_cb()), height=1)
+
+        body = HSplit([header_win, self._twin, _rounded_frame(self.ta), footer_win])
+        # Uniform left gutter (and matching right margin) so nothing sits flush
+        # against the pane edge — matches Claude Code's indented content.
+        layout = Layout(
+            VSplit([Window(width=_FS_GUTTER), body, Window(width=_FS_GUTTER)]),
+            focused_element=self.ta,
+        )
+        # Mouse capture OFF by default so native terminal select/copy works;
+        # Mouse capture OFF by default so native drag-select + COPY work. The
+        # wheel still scrolls via terminal "alternate scroll" (DECSET 1007,
+        # enabled in _run): the terminal sends Up/Down keys on wheel WITHOUT
+        # grabbing the mouse, and those are bound below to scroll the transcript.
+        # PAL_CHAT_MOUSE=1 forces real mouse tracking instead (wheel via
+        # _on_mouse, but then copy needs Shift).
+        _fs_mouse = os.getenv("PAL_CHAT_MOUSE", "0").strip().lower() in ("1", "true", "on", "yes")
+        self.app = Application(
+            layout=layout, key_bindings=kb, full_screen=True,
+            style=_box_style(), mouse_support=_fs_mouse,
+        )
+
+    # -- transcript sink ---------------------------------------------------
+    def _vis_height(self) -> int:
+        import shutil
+
+        ri = getattr(self._twin, "render_info", None)
+        if ri and getattr(ri, "window_height", 0):
+            return ri.window_height
+        rows = shutil.get_terminal_size((80, 24)).lines
+        return max(5, rows - self._header_h - 4)  # ~3 input rows + 1 footer
+
+    def _clamp_scroll(self) -> None:
+        lines = self._lines + ([self._pending] if self._pending else [])
+        max_scroll = max(0, len(lines) - self._vis_height())
+        self._scroll = max(0, min(self._scroll, max_scroll))
+
+    def _on_mouse(self, mouse_event):
+        """Wheel up/down scrolls the transcript; everything else is left alone."""
+        from prompt_toolkit.mouse_events import MouseEventType
+
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._scroll += 3
+            self._clamp_scroll()
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._scroll -= 3
+            self._clamp_scroll()
+            return None
+        return NotImplemented
+
+    def _transcript_text(self):
+        from prompt_toolkit.formatted_text import ANSI
+
+        lines = self._lines + ([self._pending] if self._pending else [])
+        h = self._vis_height()
+        max_scroll = max(0, len(lines) - h)
+        if self._scroll > max_scroll:
+            self._scroll = max_scroll            # content shrank — re-anchor
+        start = max_scroll - self._scroll        # 0 scroll -> last h lines (bottom)
+        return ANSI("\033[0m" + "\n".join(lines[start:start + h]))
+
+    def write(self, s: str) -> None:
+        s = self._pending + s
+        parts = s.split("\n")
+        self._pending = parts[-1]
+        self._lines.extend(parts[:-1])
+        if self.app.is_running:
+            self.app.invalidate()
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+    # -- live (streaming) block -------------------------------------------
+    def begin_live(self) -> None:
+        """Flush any partial line and mark where the streaming block starts, so
+        each update can re-render the whole answer (wrap-aligned) in place."""
+        if self._pending:
+            self._lines.append(self._pending)
+            self._pending = ""
+        self._live_start = len(self._lines)
+
+    def set_live(self, ansi: str) -> None:
+        """Replace the live block with a freshly rendered answer."""
+        if self._live_start is None:
+            self._live_start = len(self._lines)
+        self._lines = self._lines[:self._live_start] + ansi.rstrip("\n").split("\n")
+        if self.app.is_running:
+            self.app.invalidate()
+
+    def end_live(self) -> None:
+        self._live_start = None
+
+    # -- input -------------------------------------------------------------
+    async def next(self):
+        return await self._queue.get()
+
+
+class _CaptureConsole(Console):
+    """A rich Console whose output flows into the full-screen transcript and
+    whose blocking UI (status spinners, input prompts) is neutralised — the
+    full-screen app owns the terminal, so Live/stdin must not fight it."""
+
+    def __init__(self, sink, **kw):
+        super().__init__(file=sink, force_terminal=True, color_system="truecolor",
+                         highlight=False, **kw)
+
+    def status(self, *a, **k):
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def input(self, *a, **k):  # ask-first confirm is handled in the loop
+        return ""
 
 
 def _models_table() -> str:
@@ -1509,6 +2125,153 @@ def _launch_plan_background(goal: str | None, plan_text: str, model: str | None,
     return plan_path, res_path, proc.pid, mode
 
 
+# ---- self-correcting background plan loop ---------------------------------
+# After a backgrounded plan run finishes (the "ping"), check its results; if it
+# failed, troubleshoot from what the results say and relaunch with a DIFFERENT
+# approach, up to PAL_PLAN_MAX_RETRIES times. Default on; PAL_PLAN_AUTORETRY=0 off.
+
+def _plan_autoretry_enabled() -> bool:
+    return os.getenv("PAL_PLAN_AUTORETRY", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _read_results(res_path: str):
+    try:
+        with open(res_path, encoding="utf-8") as fh:
+            txt = fh.read().strip()
+        return json.loads(txt) if txt else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_PLAN_OK = {"complete", "completed", "success", "succeeded", "ok", "done", "pass", "passed"}
+
+
+def _plan_status(data) -> str:
+    """'success' or 'fail' from a plan-run results JSON (fail if unparseable)."""
+    if not isinstance(data, dict):
+        return "fail"
+    s = str(data.get("status", "")).strip().lower()
+    if s in _PLAN_OK:
+        return "success"
+    if s:  # an explicit non-ok status (INCOMPLETE / ERROR / FAILED)
+        return "fail"
+    return "fail" if (data.get("error") or data.get("err")) else "success"
+
+
+def _plan_failure_reason(data, res_path: str) -> str:
+    """Best-effort human reason a plan run failed, to steer the troubleshoot prompt."""
+    bits = []
+    if isinstance(data, dict):
+        if data.get("status"):
+            bits.append(f"status={data['status']}")
+        tr = data.get("transcript")
+        if isinstance(tr, list) and tr and isinstance(tr[-1], dict):
+            last = tr[-1]
+            v = last.get("verdict")
+            if isinstance(v, dict) and v.get("reason"):
+                bits.append("judge: " + str(v["reason"]))
+            for rv in (last.get("reviews") or [])[:1]:
+                note = rv.get("note") if isinstance(rv, dict) else None
+                if isinstance(note, dict) and note.get("issues"):
+                    bits.append("reviewer: " + "; ".join(map(str, note["issues"]))[:400])
+        if data.get("error"):
+            bits.append("error: " + str(data["error"]))
+    try:
+        with open(res_path + ".log", encoding="utf-8") as fh:
+            tail = fh.read().strip().splitlines()[-6:]
+        if tail:
+            bits.append("log: " + " | ".join(tail))
+    except Exception:  # noqa: BLE001
+        pass
+    return "  ".join(bits)[:1500] or "no diagnostic info (empty results file)"
+
+
+async def _troubleshoot_plan(goal, plan_text, reason, model, ptype):
+    """Ask a model for a DIFFERENT approach given the previous failure."""
+    cands = ([model] if model else []) + _plan_candidates(goal or plan_text or "", ptype)
+    instruction = (
+        "A previous attempt to accomplish the goal FAILED. Below are the goal, the plan "
+        "that failed, and the diagnostic reason. Produce a REVISED, numbered plan that "
+        "takes a DIFFERENT approach to avoid that specific failure (e.g. fix wrong paths, "
+        "wrong commands, missing setup/venv, or a refusal). One concrete, actionable step "
+        "per line; output ONLY the numbered list.\n\n"
+        f"GOAL:\n{goal or '(see plan)'}\n\nFAILED PLAN:\n{plan_text}\n\n"
+        f"FAILURE DIAGNOSIS:\n{reason}\n\nREVISED PLAN:"
+    )
+    for cand in cands:
+        try:
+            ans = await _ask_direct(cand, instruction, "")
+        except Exception:  # noqa: BLE001
+            continue
+        if ans and not ans.startswith("__ERROR__") and not _is_refusal(ans):
+            return ans.strip()
+    return ""
+
+
+def _pid_finished(pid: int) -> bool:
+    """True once a detached child has finished. A detached child we never reap
+    becomes a ZOMBIE on exit, and /proc/<pid> still exists for a zombie — so we
+    must check the process state, not just path existence (the old bug)."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            stat = fh.read()
+        # state is the first token after the ")" that closes comm (comm may have spaces)
+        state = stat.rsplit(")", 1)[1].split()[0] if ")" in stat else "?"
+        if state in ("Z", "X", "x"):  # zombie / dead -> finished
+            try:
+                os.waitpid(pid, os.WNOHANG)  # reap so it doesn't linger
+            except (ChildProcessError, OSError):
+                pass
+            return True
+        return False
+    except (FileNotFoundError, ProcessLookupError):
+        return True   # gone entirely
+    except Exception:  # noqa: BLE001
+        return True   # unknown -> assume done rather than wait forever
+
+
+async def _await_pid(pid: int, poll: float = 3.0, timeout: float = 7200.0) -> None:
+    """Wait (async) until a detached pid has finished (zombie-aware)."""
+    waited = 0.0
+    while waited < timeout and not _pid_finished(pid):
+        await asyncio.sleep(poll)
+        waited += poll
+
+
+async def _watch_and_retry(pid, res_path, goal, plan_text, model, ptype,
+                           attempt=1, max_attempts=None):
+    """Wait for a backgrounded plan run to finish, CHECK its results, and — if it
+    failed — troubleshoot from what it sees and relaunch with a revised approach,
+    up to PAL_PLAN_MAX_RETRIES (default 3). Never crashes the REPL."""
+    if max_attempts is None:
+        try:
+            max_attempts = max(1, int(os.getenv("PAL_PLAN_MAX_RETRIES", "3")))
+        except ValueError:
+            max_attempts = 3
+    try:
+        await _await_pid(pid)
+        data = _read_results(res_path)
+        if _plan_status(data) == "success":
+            _note(f"✓ plan succeeded on attempt {attempt} — {res_path}", "sys")
+            return
+        reason = _plan_failure_reason(data, res_path)
+        _note(f"⚠ plan attempt {attempt} failed: {reason[:200]}", "sys")
+        if attempt >= max_attempts:
+            _note(f"✗ gave up after {attempt} attempts — inspect {res_path}", "err")
+            return
+        _note(f"↻ troubleshooting + retrying (attempt {attempt + 1}/{max_attempts})…", "sys")
+        new_plan = await _troubleshoot_plan(goal, plan_text, reason, model, ptype)
+        if not new_plan:
+            _note("✗ troubleshooting produced no revised plan — stopping", "err")
+            return
+        _pp, rp, newpid, _mode = _launch_plan_background(goal, new_plan, model, ptype)
+        _note(f"↳ revised plan running in background (pid {newpid}) → {rp}", "sys")
+        await _watch_and_retry(newpid, rp, goal, new_plan, model, ptype,
+                               attempt + 1, max_attempts)
+    except Exception as exc:  # noqa: BLE001 - a watcher must never kill the REPL
+        _note(f"plan watcher error: {type(exc).__name__}: {exc}", "err")
+
+
 async def _run(handle):
     from providers.router import chat_router
 
@@ -1541,33 +2304,130 @@ async def _run(handle):
     def _show_welcome() -> None:
         console.print(_banner(r0["cheap"], r0["smart"], **_wctx()))
 
-    _show_welcome()
+    global console
+
+    cols = shutil.get_terminal_size((100, 30)).columns
+    content_w = max(20, cols - 2 * _FS_GUTTER)  # pane width inside the gutters
+    # Default to the pinned FULL-SCREEN TUI. With mouse capture OFF (the default;
+    # PAL_CHAT_MOUSE), the terminal still does native drag-select + copy of the
+    # visible screen, and PgUp/PgDn scroll the transcript. The ONE irreducible
+    # alt-screen tradeoff: mouse-WHEEL scroll needs PAL_CHAT_MOUSE=1, which then
+    # trades away native select. PAL_CHAT_FULLSCREEN=0 = inline (normal buffer:
+    # wheel + select + copy + scrollback all native, same styling).
+    _fullscreen = (
+        _PT_OK and sys.stdin.isatty()
+        and os.getenv("PAL_CHAT_FULLSCREEN", "1").strip().lower()
+        not in ("0", "false", "off", "no")
+    )
+
+    def _fs_footer():
+        return HTML(
+            f"<style fg='{_CC_ACCENT}'>{_PERM_LABEL[state.perm]}</style>"
+            f"<style fg='{_CC_DIM}'>  ·  shift+tab  ·  {state.model or 'auto'}"
+            f"{_footer_extra(state)}  ·  PgUp/PgDn scroll</style>"
+        )
+
+    ui = None
+    app_task = None
+    session = None
+    _orig_console = console
+
+    def _alt_scroll(on: bool) -> None:
+        # DECSET 1007 — terminal sends Up/Down keys on wheel while on the alt
+        # screen, WITHOUT mouse tracking (so native select/copy still works).
+        if os.getenv("PAL_CHAT_MOUSE", "0").strip().lower() in ("1", "true", "on", "yes"):
+            return  # real mouse tracking is on instead; don't fight it
+        try:
+            with open("/dev/tty", "w") as _tty:
+                _tty.write("\x1b[?1007h" if on else "\x1b[?1007l")
+                _tty.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _teardown():
+        global console, _FULLSCREEN_ACTIVE, _FS_UI
+        if ui is not None:
+            _alt_scroll(False)
+            try:
+                if ui.app.is_running:
+                    ui.app.exit()
+            except Exception:
+                pass
+            if app_task is not None:
+                try:
+                    await app_task
+                except Exception:
+                    pass
+        console = _orig_console
+        _FULLSCREEN_ACTIVE = False
+        _FS_UI = None
+
+    if _fullscreen:
+        try:
+            header_ansi = _render_ansi(_banner(r0["cheap"], r0["smart"], **_wctx()), content_w)
+            ui = _FullScreenUI(header_ansi, state, _fs_footer, content_width=content_w)
+            globals()["_FULLSCREEN_ACTIVE"] = True
+            globals()["_FS_UI"] = ui
+            console = _CaptureConsole(ui, width=content_w)
+            app_task = asyncio.ensure_future(ui.app.run_async())
+            await asyncio.sleep(0.05)   # let the app enter the alt screen first
+            _alt_scroll(True)           # wheel → Up/Down keys (native copy kept)
+        except Exception:
+            ui = None
+            app_task = None
+            console = _orig_console
+            globals()["_FULLSCREEN_ACTIVE"] = False
+            globals()["_FS_UI"] = None
+            _fullscreen = False
+
+    if not _fullscreen:
+        _show_welcome()
+        if _PT_OK and sys.stdin.isatty():
+            _boxed = os.getenv("PAL_CHAT_BOX", "1").strip().lower() not in ("0", "false", "off", "no")
+            try:
+                session = _BoxedPrompt(session_id, state) if _boxed else _build_prompt_session(session_id, state)
+            except Exception:
+                try:
+                    session = _build_prompt_session(session_id, state)  # fall back to the plain session
+                except Exception:
+                    session = None  # no real TTY -- fall back to plain input
+
     prior = session_store.latest()
     if prior and prior.get("turns"):
         _note(f"{prior['turns']} turns from your last session — /resume to continue", "sys")
 
-    session = None
-    if _PT_OK and sys.stdin.isatty():
-        _boxed = os.getenv("PAL_CHAT_BOX", "1").strip().lower() not in ("0", "false", "off", "no")
-        try:
-            session = _BoxedPrompt(session_id, state) if _boxed else _build_prompt_session(session_id, state)
-        except Exception:
-            try:
-                session = _build_prompt_session(session_id, state)  # fall back to the plain session
-            except Exception:
-                session = None  # no real TTY -- fall back to plain input
-
     while True:
+        # Between turns: not busy, refresh the context-usage gauge (F2/F4/F5).
+        state.busy = False
+        _CANCEL.clear()
         try:
-            line = await _read_line(session, cwd)
+            state.ctx_pct = _context_pct(history, selected_model or "")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if ui is not None:
+                kind, payload = await ui.next()
+                if kind == "sig":
+                    raise (KeyboardInterrupt if payload == "int" else EOFError)
+                line = payload.strip()
+                if state.queued > 0:
+                    state.queued -= 1   # F4: this queued message is now running
+            else:
+                line = await _read_line(session, cwd)
         except (EOFError, KeyboardInterrupt):
+            await _teardown()
             console.print("\n[dim]bye[/]")
             return 0
         if not line:
             continue
 
+        _echo_user(line)      # Claude-Code '❯ ' echo of what was asked
+        _turn_t0 = time.monotonic()
+        state.busy = True     # a turn is in flight (enables Esc-interrupt, queueing)
+
         low = line.lower()
         if low in ("/exit", "/quit", "/q"):
+            await _teardown()
             console.print("[dim]bye[/]")
             return 0
         if low in ("/help", "/h", "?"):
@@ -1681,6 +2541,7 @@ async def _run(handle):
             _ctx_append(history, "assistant", ans)
             _persist()
             last_answer = ans
+            _done_footer(_turn_t0)
             continue
 
         # /agent[:edit|:plan|:review] <task> -> full Claude Code agent via clink
@@ -1708,6 +2569,7 @@ async def _run(handle):
                 _ctx_append(history, "assistant", ans)
                 _persist()
                 last_answer = ans
+                _done_footer(_turn_t0)
                 console.print("[dim]plan ready — execute it on engine models with /feed (or /plan <goal>)[/]")
             else:
                 # Execution stays self-dependent: run on the smartest local
@@ -1744,6 +2606,7 @@ async def _run(handle):
                 _ctx_append(history, "assistant", ans)
                 _persist()
                 last_answer = ans
+                _done_footer(_turn_t0)
             continue
 
         # /tools <task> -> FULL power by default (any command + all tools).
@@ -1919,6 +2782,7 @@ async def _run(handle):
                 continue
             console.print(_bubble(f"{model} · plan", ans, color="green"))
             last_answer = ans
+            _done_footer(_turn_t0)
             if draft_only:
                 console.print("[dim]↳ draft only. /feed to run it through PAL.[/]")
                 continue
@@ -1927,6 +2791,8 @@ async def _run(handle):
                 _pp, _rp, _pid, _mode = _launch_plan_background(goal, ans, exec_model, ptype)
                 console.print(f"[dim]↳ executing via PAL [bold]{_mode}[/] (orchestrated: distribute+review+retry) "
                               f"in BACKGROUND (pid {_pid}) — popup + sound when done. results → {_rp}[/]")
+                if _plan_autoretry_enabled():
+                    asyncio.ensure_future(_watch_and_retry(_pid, _rp, goal, ans, exec_model, ptype))
             else:
                 console.print("[dim]↳ executing via PAL (orchestrated) …[/]")
                 _mode, _cmd, _out = await _run_plan_through_pal(goal, ans, exec_model, ptype)
@@ -1949,6 +2815,8 @@ async def _run(handle):
                 _pp, _rp, _pid, _mode = _launch_plan_background(None, plan_text, selected_model)
                 console.print(f"[dim]→ executing via PAL [bold]{_mode}[/] (orchestrated) in BACKGROUND "
                               f"(pid {_pid}) — popup + sound when done. results → {_rp}[/]")
+                if _plan_autoretry_enabled():
+                    asyncio.ensure_future(_watch_and_retry(_pid, _rp, None, plan_text, selected_model, "general"))
             else:
                 console.print("[dim]→ executing via PAL (orchestrated)…[/]")
                 _mode, _cmd, out = await _run_plan_through_pal(None, plan_text, selected_model)
@@ -1990,6 +2858,7 @@ async def _run(handle):
             _ctx_append(history, "assistant", ans)
             _persist()
             last_answer = ans
+            _done_footer(_turn_t0)
             continue
 
         # Smalltalk / greetings answer conversationally — no tools, no box —
@@ -2010,6 +2879,7 @@ async def _run(handle):
                 _ctx_append(history, "assistant", ans)
                 _persist()
                 last_answer = ans
+                _done_footer(_turn_t0)
                 continue
 
         # DEFAULT: a real task runs with tools. Pick the selected model or a pool.
@@ -2027,7 +2897,11 @@ async def _run(handle):
             continue
         # Permission mode (Shift+Tab cycles it): auto/full, ask-first, or read-only.
         full = state.perm != "read-only"
-        if state.perm == "ask":
+        if state.perm == "ask" and ui is not None:
+            # The full-screen app owns stdin — can't block on a y/N prompt.
+            _note("ask-mode confirm isn't available in full-screen — running with full tools", "sys")
+            full = True
+        elif state.perm == "ask":
             try:
                 ok = await asyncio.to_thread(console.input, "[dim]> run with full tools? [y/N][/] ")
             except (EOFError, KeyboardInterrupt):
@@ -2039,15 +2913,12 @@ async def _run(handle):
                 line, pool, cwd, max_steps=8 if full else 5, full=full,
                 history_preamble=preamble, on_tool=_print_tool,
             )
-        if ans.startswith("__ERROR__"):
-            console.print(_bubble(used, ans))
-        else:
-            console.print(Text("⏺ ", style=_ACCENT), end="")
-            console.print(Markdown(ans))
+        console.print(_bubble(used, ans))
         _ctx_append(history, "user", line)
         _ctx_append(history, "assistant", ans)
         _persist()
         last_answer = ans
+        _done_footer(_turn_t0)
         # Huge/high-stakes task -> gate the answer through the debate panel.
         if _auto_debate_enabled() and not ans.startswith("__ERROR__") and _is_huge_task(line, len(transcript)):
             _note("huge task → validating via debate panel (executor→reviewer→judge; PAL_CHAT_AUTODEBATE=0 to skip)",

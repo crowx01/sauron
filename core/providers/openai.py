@@ -135,7 +135,6 @@ class OpenAIModelProvider(RegistryBackedProviderMixin, OpenAICompatibleProvider)
             preferred = find_first(
                 [
                     "gpt-5.2",
-                    "gpt-5.1-codex-mini",
                     "gpt-5",
                     "gpt-5-mini",
                     "gpt-5-codex",

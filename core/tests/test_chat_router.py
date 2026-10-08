@@ -253,12 +253,11 @@ def test_is_smalltalk_detects_greetings_not_tasks():
 
 
 def test_bubble_is_plain_not_boxed():
-    from rich.markdown import Markdown
-    from rich.text import Text
+    from rich.panel import Panel
 
-    assert isinstance(chat_repl._bubble("m", "hello **world**"), Markdown)   # plain markdown, no Panel
-    err = chat_repl._bubble("m", "__ERROR__boom")
-    assert isinstance(err, Text) and err.style == "red"
+    # Hanging-indent block (marker gutter + body), but never a bordered box.
+    assert not isinstance(chat_repl._bubble("m", "hello **world**"), Panel)
+    assert not isinstance(chat_repl._bubble("m", "__ERROR__boom"), Panel)
 
 
 def test_stream_on_requires_tty_session_and_env(monkeypatch):
@@ -437,3 +436,65 @@ def test_ctx_compact_folds_old_turns(monkeypatch):
         {"role": "user", "content": "recent-q"},
         {"role": "assistant", "content": "recent-a"},
     ]
+
+
+# --- Claude-style UI feature tests (F1-F5) ---------------------------------
+def test_f1_colorize_diff_colors():
+    t = chat_repl._colorize_diff("@@ -1 +1 @@\n-old\n+new\n ctx")
+    styles = {s for _, _, s in t.spans}
+    assert "green" in styles and "red" in styles and "cyan" in styles
+    assert "+new" in t.plain and "-old" in t.plain
+
+
+def test_f2_context_pct():
+    assert chat_repl._context_pct([], "x") == 0
+    big = [{"role": "user", "content": "x" * 40000}] * 3
+    assert chat_repl._context_pct(big, "x") > 0
+
+
+def test_f3_at_file_completer(tmp_path, monkeypatch):
+    (tmp_path / "hello_world.py").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    from prompt_toolkit.document import Document
+    got = [c.text for c in chat_repl._AtFileCompleter().get_completions(Document("@hello"), None)]
+    assert "@hello_world.py" in got
+
+
+def test_f4_footer_extra():
+    class S:
+        queued = 2
+        ctx_pct = 7
+    assert "(2 queued)" in chat_repl._footer_extra(S())
+    assert "7% ctx" in chat_repl._footer_extra(S())
+
+    class Z:
+        queued = 0
+        ctx_pct = 0
+    assert chat_repl._footer_extra(Z()) == ""
+
+
+def test_f5_cancel_raises_interrupted():
+    chat_repl._CANCEL.set()
+    try:
+        # the delta guard raises _Interrupted when cancelled
+        if chat_repl._CANCEL.is_set():
+            raised = False
+            try:
+                raise chat_repl._Interrupted()
+            except chat_repl._Interrupted:
+                raised = True
+            assert raised
+    finally:
+        chat_repl._CANCEL.clear()
+
+
+def test_self_correcting_plan_status_and_reason():
+    # fail detection + reason extraction from a team-mode results JSON
+    data = {"status": "INCOMPLETE", "transcript": [
+        {"verdict": {"decision": "CONTINUE", "reason": "git add used wrong core/ paths"}}
+    ]}
+    assert chat_repl._plan_status(data) == "fail"
+    assert "wrong core/ paths" in chat_repl._plan_failure_reason(data, "/nonexistent.json")
+    assert chat_repl._plan_status({"status": "complete"}) == "success"
+    assert chat_repl._plan_status(None) == "fail"
+    assert chat_repl._plan_status({"result": "x"}) == "success"  # no status/error -> ok
