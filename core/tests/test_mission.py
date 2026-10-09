@@ -461,3 +461,178 @@ def test_synth_prefers_largest_context(monkeypatch):
     monkeypatch.setattr(mission, "_rank_for_role", lambda role, roster: list(roster))
     res = asyncio.run(mission.run_panel("goal", ["small", "huge"], "judge", True))
     assert res["synthesizer"] == "huge"  # biggest-context model chosen for the merge
+
+
+# --- C9: coder/ops tier routing -----------------------------------------------
+
+def test_coder_tier_defaults_to_writer_pool():
+    """PAL_MISSION_CODER_TIER unset → defaults to _writer_pool output."""
+    import os
+    os.environ.pop("PAL_MISSION_CODER_TIER", None)
+    assert mission._coder_tier("code") == mission._writer_pool("code")
+
+
+def test_ops_tier_defaults_to_executor_pool():
+    import os
+    os.environ.pop("PAL_MISSION_OPS_TIER", None)
+    assert mission._ops_tier("code") == mission._executor_pool("code")
+
+
+def test_coder_tier_env_override():
+    """PAL_MISSION_CODER_TIER env var overrides the default list."""
+    import os
+    old = os.environ.get("PAL_MISSION_CODER_TIER")
+    os.environ["PAL_MISSION_CODER_TIER"] = "model-a,model-b"
+    try:
+        assert mission._coder_tier("code") == ["model-a", "model-b"]
+    finally:
+        if old is None:
+            os.environ.pop("PAL_MISSION_CODER_TIER", None)
+        else:
+            os.environ["PAL_MISSION_CODER_TIER"] = old
+
+
+def test_ops_tier_env_override():
+    import os
+    old = os.environ.get("PAL_MISSION_OPS_TIER")
+    os.environ["PAL_MISSION_OPS_TIER"] = "ops-x,ops-y"
+    try:
+        assert mission._ops_tier("code") == ["ops-x", "ops-y"]
+    finally:
+        if old is None:
+            os.environ.pop("PAL_MISSION_OPS_TIER", None)
+        else:
+            os.environ["PAL_MISSION_OPS_TIER"] = old
+
+
+def test_tier_claude_excluded():
+    """Claude/Anthropic IDs are filtered from tier lists."""
+    import os
+    os.environ["PAL_MISSION_CODER_TIER"] = "qwen3,anthropic/claude-opus-4.5,gemini-x"
+    try:
+        assert mission._coder_tier("code") == ["qwen3", "gemini-x"]
+    finally:
+        os.environ.pop("PAL_MISSION_CODER_TIER", None)
+
+
+def test_classify_step_author_vs_ops():
+    assert mission._classify_step({"files": [{"path": "x"}]}) == "author"
+    assert mission._classify_step({"edits": [{"path": "x"}]}) == "author"
+    assert mission._classify_step({"commands": ["ls"]}) == "ops"
+    assert mission._classify_step({}) == "ops"
+    assert mission._classify_step(None) == "ops"
+
+
+def test_tier_pool_fallback_combines_tiers():
+    """_tier_pool returns the primary tier first, then fallback tier models."""
+    import os
+    os.environ["PAL_MISSION_CODER_TIER"] = "coder1,coder2"
+    os.environ["PAL_MISSION_OPS_TIER"] = "ops1,ops2"
+    try:
+        author_pool = mission._tier_pool("author", "code")
+        assert author_pool[:2] == ["coder1", "coder2"]
+        assert "ops1" in author_pool  # fallback appended
+        ops_pool = mission._tier_pool("ops", "code")
+        assert ops_pool[:2] == ["ops1", "ops2"]
+        assert "coder1" in ops_pool
+    finally:
+        os.environ.pop("PAL_MISSION_CODER_TIER", None)
+        os.environ.pop("PAL_MISSION_OPS_TIER", None)
+
+
+def test_pick_tier_selects_from_correct_tier(monkeypatch):
+    """_pick_tier picks an available model from the author tier for author steps."""
+    monkeypatch.setattr("providers.router.chat_repl._is_available",
+                        lambda m: m == "coder1")
+    monkeypatch.setenv("PAL_MISSION_CODER_TIER", "coder1,coder2")
+    monkeypatch.setenv("PAL_MISSION_OPS_TIER", "ops1,ops2")
+    assert mission._pick_tier("author", "code") == "coder1"
+    assert mission._pick_tier("ops", "code") == "ops1"  # first ops tier available
+
+
+def test_pick_tier_falls_through_on_unavailable(monkeypatch):
+    """When all primary-tier models are unavailable, falls through to the other tier."""
+    monkeypatch.setattr("providers.router.chat_repl._is_available",
+                        lambda m: m == "ops1")  # only ops model available
+    monkeypatch.setenv("PAL_MISSION_CODER_TIER", "coder1,coder2")
+    monkeypatch.setenv("PAL_MISSION_OPS_TIER", "ops1,ops2")
+    # author step but coder tier all unavailable → falls through to ops1
+    assert mission._pick_tier("author", "code") == "ops1"
+
+
+# --- PAL_MISSION_STALL_N ------------------------------------------------------
+
+def test_stall_n_env_override():
+    """PAL_MISSION_STALL_N overrides the default no-progress limit."""
+    import os
+    old = os.environ.get("PAL_MISSION_STALL_N")
+    os.environ["PAL_MISSION_STALL_N"] = "5"
+    try:
+        assert mission._no_progress_limit() == 5
+    finally:
+        if old is None:
+            os.environ.pop("PAL_MISSION_STALL_N", None)
+        else:
+            os.environ["PAL_MISSION_STALL_N"] = old
+
+
+def test_stall_n_falls_back_to_noprogress_iters():
+    """Without PAL_MISSION_STALL_N, the old PAL_MISSION_NOPROGRESS_ITERS is used."""
+    import os
+    os.environ.pop("PAL_MISSION_STALL_N", None)
+    old = os.environ.get("PAL_MISSION_NOPROGRESS_ITERS")
+    os.environ["PAL_MISSION_NOPROGRESS_ITERS"] = "3"
+    try:
+        assert mission._no_progress_limit() == 3
+    finally:
+        if old is None:
+            os.environ.pop("PAL_MISSION_NOPROGRESS_ITERS", None)
+        else:
+            os.environ["PAL_MISSION_NOPROGRESS_ITERS"] = old
+
+
+def test_stall_n_disables_with_zero():
+    import os
+    os.environ["PAL_MISSION_STALL_N"] = "0"
+    try:
+        assert mission._no_progress_limit() == 0
+    finally:
+        os.environ.pop("PAL_MISSION_STALL_N", None)
+
+
+def test_stall_n_min_clamp():
+    """Values below 2 are clamped to 2 (need at least 2 to detect repetition)."""
+    import os
+    os.environ["PAL_MISSION_STALL_N"] = "1"
+    try:
+        assert mission._no_progress_limit() == 2
+    finally:
+        os.environ.pop("PAL_MISSION_STALL_N", None)
+
+
+def test_stall_detect_aborts_before_max_iters(monkeypatch):
+    """When PAL_MISSION_STALL_N is set and the executor evidence repeats for N
+    consecutive iterations, the loop stops with an explicit stall reason —
+    NOT at the flat max_iters cap, and does NOT report false COMPLETE."""
+    monkeypatch.setenv("PAL_MISSION_STALL_N", "3")
+    monkeypatch.setenv("PAL_MISSION_ENSEMBLE", "off")
+
+    # Writer always emits the same failing plan (same empty output every iteration)
+    def fake_generate(model, prompt, system, **kw):
+        if "WRITER" in system:
+            return _resp(json.dumps({"files": [], "edits": [], "commands": []}))
+        return _resp(json.dumps({"decision": "CONTINUE", "feedback": "not done"}))
+
+    async def fake_loop(task, model, cwd, max_steps=3, full=True):
+        return ("", [])
+
+    monkeypatch.setattr("providers.router.dispatch.generate", fake_generate)
+    monkeypatch.setattr("providers.router.chat_repl._tools_loop", fake_loop)
+    monkeypatch.setattr(mission, "_pick", lambda models: models[0])
+
+    res = asyncio.run(mission.run_mission(
+        "goal", writer="w", executor="e", judge="j", max_iters=10, auto=False))
+    assert res["status"] == "INCOMPLETE"
+    assert res.get("no_progress") is True
+    assert "no forward progress" in res.get("no_progress_reason", "")
+    assert res["iterations"] < 10  # stopped early, not at the cap
