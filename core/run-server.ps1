@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Installation, configuration, and launch script for PAL MCP server on Windows.
 
