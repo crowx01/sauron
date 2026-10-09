@@ -209,6 +209,49 @@ def _executor_pool(mtype: str) -> list[str]:
     return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
 
 
+# --- C9: coder/ops model tier ------------------------------------------------
+
+def _coder_tier(mtype: str) -> list[str]:
+    """Author tier: models for file writes/edits (coding). Defaults to writer pool."""
+    return _env_models("PAL_MISSION_CODER_TIER", _writer_pool(mtype))
+
+
+def _ops_tier(mtype: str) -> list[str]:
+    """Ops/bulk tier: models for grep, listing, simple transforms. Defaults to executor pool."""
+    return _env_models("PAL_MISSION_OPS_TIER", _executor_pool(mtype))
+
+
+def _classify_step(plan: dict) -> str:
+    """Simple keyword-based step classifier: 'author' for file writes/edits, 'ops' otherwise."""
+    if not isinstance(plan, dict):
+        return "ops"
+    if plan.get("files") or plan.get("edits"):
+        return "author"
+    return "ops"
+
+
+def _tier_pool(step_tag: str, mtype: str) -> list[str]:
+    """Return the model pool for the given step tag, with fallback to the other tier."""
+    if step_tag == "author":
+        primary = _coder_tier(mtype)
+        fallback = _ops_tier(mtype)
+    else:
+        primary = _ops_tier(mtype)
+        fallback = _coder_tier(mtype)
+    seen: set[str] = set()
+    combined: list[str] = []
+    for m in primary + fallback:
+        if m not in seen:
+            seen.add(m)
+            combined.append(m)
+    return combined
+
+
+def _pick_tier(step_tag: str, mtype: str) -> str | None:
+    """Pick a model from the correct tier, falling through the ordered list on unavailability."""
+    return _pick(_tier_pool(step_tag, mtype))
+
+
 # --- M1-M2: full-roster ensemble + capability-aware, fair-use scheduling -------
 
 def _all_available_models() -> list[str]:
@@ -640,10 +683,17 @@ def _progress_fingerprint(report: dict) -> str:
 
 
 def _no_progress_limit() -> int:
-    try:
-        configured = int(os.getenv("PAL_MISSION_NOPROGRESS_ITERS", "2"))
-    except (TypeError, ValueError):
-        configured = 2
+    stall = os.getenv("PAL_MISSION_STALL_N")
+    if stall is not None:
+        try:
+            configured = int(stall)
+        except (TypeError, ValueError):
+            configured = 3
+    else:
+        try:
+            configured = int(os.getenv("PAL_MISSION_NOPROGRESS_ITERS", "2"))
+        except (TypeError, ValueError):
+            configured = 2
     return 0 if configured <= 0 else max(2, configured)
 
 
