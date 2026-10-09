@@ -1,0 +1,118 @@
+{
+  "handoff_prompt": {
+    "title": "Sauron headless-reliability improvements — BATCH 2 (also_in_this_batch + backlog, debate-revised) — implement test-first",
+    "for": "A future Claude Code session (me) working on the sauron repo. Self-contained: assume no memory of the originating conversation. Companion file: sauron_improvement_plan.json (batch 1) — READ THAT FIRST, it defines repo paths, hard_constraints, and verification_protocol reused here verbatim.",
+    "date_created": "2026-10-09",
+    "repo": {
+      "path": "/home/kali/tools/sauron-work/sauron",
+      "engine_subdir": "core",
+      "venv": "core/.sauron_venv/bin/python",
+      "run_tests": "cd core && PYTHONPATH=. .sauron_venv/bin/python -m pytest tests/test_mission.py tests/test_size_guard.py tests/test_fallback_chain.py tests/test_custom_provider.py tests/test_chat_router.py tests/test_router_guardrail.py -q",
+      "remotes": {"origin": "https://github.com/crowx01/sauron (user's)", "darxbloo": "https://github.com/Darxbloo/sauron (other; do not push without asking)"}
+    },
+    "state_as_of_handoff": {
+      "work_branch": "feat/resilient-mission (open DRAFT PR #5 on crowx01/sauron, base main)",
+      "verified_2026-10-09": "grep-checked providers/router/chat_repl.py and mission.py directly: NONE of batch 1's first_batch_ship_now (A execution-guard, B5 compile-gate, B7 seed-bias) or also_in_this_batch (EDIT_PROTOCOL whole-file, NOPROGRESS detector, B6cheap symbols-called) are implemented yet — only the broader session items already listed in batch 1's state_as_of_handoff (size_guard, fallback_chain, ensemble, providers) landed. So batch 1 is SPEC-ONLY so far; implement batch 1 before or alongside this file, not instead of it.",
+      "this_file_covers": "batch 1's 'also_in_this_batch' (EDIT_PROTOCOL, NOPROGRESS, B6cheap) carried forward unchanged + batch 1's 'backlog_lower_priority' (C9, opencode, gated_claude), now firmed up via a fresh 2-model PAL consensus debate (qwen3 for / gpt-oss-120b against) run 2026-10-09."
+    },
+    "objective": "Same as batch 1: raise sauron's HEADLESS reliability with weak free/open models for (1) multi-file code authoring producing plausible-but-dead code, (2) driving fixed external-CLI sequences without looping. This file adds the edit-protocol change, the cross-iteration stall detector, cheap dead-code guard, and the (now-decided) backlog items.",
+    "hard_constraints": [
+      "NEVER route PAL/sauron sub-tasks to Claude/Anthropic (cost rule) — this is now a HARD rule for this batch too; see debate_outcome_batch2 on gated_claude.",
+      "Test-first: every new helper/behavior must be exercised by a NEW test that CALLS it (grep the symbol is invoked), not merely importable.",
+      "Keep all existing tests green (175+ as of batch 1); new behavior env-guarded and default-safe.",
+      "Preserve safety invariants: never Claude, _is_protected paths, quarantine/413-reorder, verifier gate, writer-failover.",
+      "Grounding caveat: when picking concrete model ids for C9, do NOT trust free-model suggestions verbatim — both debate models hallucinated nonexistent ids (llama-3.3-70b-versatile, deepseek-chat-free, gemini-1.5-flash, qwen2-7b-instruct, mistral-coder-7b are NOT in sauron's actual provider roster). Always cross-check against mcp__pal__listmodels / providers.registry.ModelProviderRegistry.get_available_models() before wiring any model id.",
+      "git: work on feat/resilient-mission (or a child branch); never push main, never force-push, never merge without explicit user approval; open draft PRs."
+    ],
+    "debate_outcome_batch2": {
+      "debaters": "qwen3 (groq, stance=for) + gpt-oss-120b (groq, stance=against), via mcp__pal__consensus, 2026-10-09",
+      "agreement": "Both models independently converged on the same 3 verdicts despite opposing stances:",
+      "decided": [
+        "C9 coder model tier: SHIP NOW. Low-risk, cheap — a step-tag router (author vs. ops/bulk) with an ordered allowlist + fallback. Both models proposed concrete model ids, but both hallucinated ids outside sauron's real roster — SEE grounded_coder_tier below for the corrected, roster-verified list.",
+        "opencode/aider backend: SHIP LATER, explicitly gated behind A/B5/B7 landing first and proving the baseline LLM-writes-full-file flow. Minimal shape = thin subprocess wrapper + adapter behind a config flag (default off), NOT a full SDK integration. Reuse the same wrapper shape for aider later.",
+        "gated_claude: DROP ENTIRELY (unanimous, not just lower priority). Both models called it scope-creep that directly undermines the repo's own 'never Claude' cost invariant; the correct escape valve for a genuinely hard step is better prompt engineering / task decomposition in C9, or a documented manual-fallback procedure the USER runs themselves outside sauron — sauron itself must never offer or gate a Claude path."
+      ]
+    },
+    "plan": {
+      "second_batch_ship_now": [
+        {
+          "id": "EDIT_PROTOCOL",
+          "name": "whole-file replacement edit protocol",
+          "desc": "Change the mission edit protocol so the writer emits full replacement file content (files[]) rather than byte-exact old->new snippet edits, for any file under ~B5's size threshold. Keep edits[] (surgical snippet form) only as an opt-in path for tiny single-line changes where the model explicitly chooses it. Validate every whole-file write via the B5 compile/lint gate before accepting it.",
+          "why": "Debate-decided in batch 1: diffs/snippets demand hunk/context alignment that weak models silently botch; a whole file is trivially validated via ast.parse/compile.",
+          "wiring": "providers/router/mission.py: _WRITER_SYS (prompt instructs files[] full-content form as default), _execute_plan (branch: files[] -> write+B5-validate; edits[] -> existing snippet path, now explicitly legacy/opt-in).",
+          "depends_on": "B5 compile-gate (batch 1) must land first — this item's acceptance test asserts the compile gate is invoked on every files[] write.",
+          "test_first": "New test monkeypatches dispatch.generate to return a files[] payload with intentionally broken syntax; assert _execute_plan calls the B5 validator (not just that B5 exists) and rejects/repairs before marking the step done."
+        },
+        {
+          "id": "NOPROGRESS",
+          "name": "cross-iteration no-progress / stall detector",
+          "desc": "Track verify-gate verdicts and error signatures across mission iterations. If N (default 3, env PAL_MISSION_STALL_N) consecutive iterations show no forward progress — same failing verify command, identical error string/symbol, or no new files_written/edits_applied — escalate: either fall back to the deterministic/non-LLM path where one exists, or abort the mission with a clear 'no progress after N iterations' reason instead of silently burning the step budget.",
+          "why": "qwen3 flagged this as the missing guard in batch 1's own debate; generalizes the per-step dedup in execution-guard (A2) to the iteration level — this is what would have cut short the observed 4-iteration failed refactor.",
+          "wiring": "providers/router/mission.py: run_mission loop (track last-N verdicts/error-signatures in a small ring buffer) and run_panel (same check across panel rounds).",
+          "test_first": "New test drives run_mission with a mocked writer that always returns the same failing output; assert the loop stops at iteration N+1 with an explicit stall reason, not at the flat max-steps limit, and does NOT report false COMPLETE."
+        },
+        {
+          "id": "B6cheap",
+          "name": "symbols-called acceptance (grep form only)",
+          "desc": "When a mission's plan claims to add a new function/class, the acceptance/verify step greps the rest of the touched files (and, cheaply, the immediate repo) for an actual call site of that symbol — not just that it's defined or importable. Stays a plain grep/regex check; explicitly do NOT build a call-graph or static-analysis pass (brittle on dynamic Python, batch 1 already ruled this out).",
+          "why": "Cheapest possible guard against the exact 'dead code passed the gate' failure class (helper defined, never wired).",
+          "wiring": "providers/router/mission.py: _deterministic_gate / _gate_verdict — add one more cheap check alongside existing verify-command execution.",
+          "test_first": "New test: plan claims to add function foo(), writer emits foo() defined but never called anywhere in the diff/repo; assert the gate flags it (COMPLETE withheld) even though verify commands pass."
+        }
+      ],
+      "backlog_now_specified": [
+        {
+          "id": "C9",
+          "name": "coder model tier (grounded)",
+          "status": "ship_now per debate, but with corrected model ids",
+          "desc": "Add a step-tag router: steps tagged 'author' (file writes/edits) use the coder-tier allowlist below; steps tagged 'ops'/'bulk' (grep, listing, simple transforms) use the cheap tier. Config-driven, lives next to the existing _writer_pool logic.",
+          "grounded_coder_tier": {
+            "note": "Verified against actual mcp__pal__listmodels output 2026-10-09 — do NOT use the hallucinated ids from the raw debate transcript (kept in debate_outcome_batch2 only as historical record).",
+            "author_tier_ordered": ["gpt-oss-120b (groq, custom provider, 131K ctx, top open-weight reasoning)", "qwen3 / qwen/qwen3.8-27b (groq, 131K ctx, strong for code)", "gemini-3.1-pro-preview (google, 1M ctx, thinking + structured code-gen, for large-context authoring)", "nvidia/nemotron-3.5-lightning:free (openrouter, 1M ctx, thinking — fallback when groq quota exhausted, per existing failover memory)"],
+            "ops_bulk_tier_ordered": ["gpt-oss-20b / groq-fast (groq, 131K ctx, ~1000 tok/s, cheapest/fastest)", "gemini-3.5-flash-lite (google, 1M ctx, lightweight text-only, always-available per prior session's reliability notes)", "gemini-3.6-flash (google, 1M ctx, fast general)"]
+          },
+          "wiring": "providers/router/mission.py or wherever _writer_pool is defined; add coder_tier_allowlist + ops_tier_allowlist as config (env-overridable), step-tag classifier (simple keyword/plan-field based, not ML).",
+          "test_first": "New test: mock two plan steps, one tagged author one tagged ops; assert the router selects a model from the correct tier list for each, and falls through the ordered list on a mocked 429/unavailable."
+        },
+        {
+          "id": "opencode",
+          "name": "opencode/aider backend (deferred, specified)",
+          "status": "ship_later — explicitly gated on A/B5/B7 landing and proving the baseline first",
+          "desc": "Thin subprocess wrapper: detect `opencode` (or `aider`) on PATH; if present AND use_opencode_backend=true (default false), invoke it instead of the built-in LLM-writes-files flow for authoring steps; translate its output into the orchestrator's existing files[]/edits[] representation; run the SAME B5 compile-gate on its output as on LLM output (no special-casing).",
+          "minimal_shape": "subprocess.run with timeout -> parse its diff/JSON output -> map to internal Edit/files[] structs -> feed through existing _execute_plan validation path unchanged.",
+          "wiring": "New small module providers/router/opencode_backend.py; one call site in mission._execute_plan behind the config flag.",
+          "do_not_build_yet": "No interactive patching, no bidirectional session with opencode, no custom diff format — just one-shot invoke + parse + reuse existing validation."
+        }
+      ],
+      "dropped": [
+        "gated_claude — unanimous drop per debate_outcome_batch2 (not just deprioritized; remove from all future planning unless the user explicitly reopens it).",
+        "(carried from batch 1) B4 unified-diff, C10 best-of-N, B8 one-change-per-iteration, B6 call-graph/static-analysis form."
+      ]
+    },
+    "grounded_wiring_pointers": {
+      "full_roster": "providers.registry.ModelProviderRegistry.get_available_models(respect_restrictions=True) — or mcp__pal__listmodels for a quick human-readable check before hardcoding any model id",
+      "availability": "providers.router.chat_repl._is_available(model)",
+      "usage_ledger_for_fairness": "providers.router.episode_store.observed(model, 'mission')",
+      "tool_loop": "providers.router.chat_repl._tools_loop (confirmed: no dedup/progress guard present yet as of 2026-10-09 — batch 1's A2 still outstanding)",
+      "headless_plan": "providers.router.headless.py (_read_plan, run_task, run_plan, run_mission dispatch)",
+      "mission_pipeline": "providers.router.mission.py (run_mission, run_panel, _execute_plan, _WRITER_SYS, _deterministic_gate, _gate_verdict, _repo_context already exists and underlies B7)",
+      "size_caps": "providers.router.size_guard.MODEL_INPUT_CAPS + cap_for/effective_cap",
+      "fallback": "providers.router.fallback_chain.py (should_fallback, call_with_fallback, quarantine)"
+    },
+    "verification_protocol": "Same as batch 1: write the failing test FIRST (monkeypatch dispatch.generate / _tools_loop / registry so it runs offline and the new symbol is actually called), implement, make green, run the full suite, commit on the branch with a clear message and NO Claude attribution. Then one live monitored `sauron mission` via a fork to confirm end-to-end.",
+    "suggested_order": [
+      "1. Finish batch 1 first_batch_ship_now (A execution-guard, B5 compile-gate, B7 seed-bias) if not already done — NOPROGRESS and EDIT_PROTOCOL below both depend on B5 existing.",
+      "2. EDIT_PROTOCOL (depends on B5) + B6cheap (independent, cheap, do anytime) — these two directly attack 'plausible-but-dead code'.",
+      "3. NOPROGRESS detector — depends on having a stable verify-gate signal (already exists from batch 1's P5 gate) to compare across iterations.",
+      "4. C9 coder tier — independent of the above, can be done in parallel; lowest implementation risk of this whole file.",
+      "5. opencode backend — explicitly last, only after 1-4 are green and a live mission run has been compared against the pre-batch2 baseline."
+    ],
+    "first_actions": [
+      "cd /home/kali/tools/sauron-work/sauron/core; git checkout feat/resilient-mission; confirm existing tests green.",
+      "Re-verify nothing in batch 1 or this file landed since 2026-10-09 (grep for EDIT_PROTOCOL/coder_tier_allowlist/PAL_MISSION_STALL_N markers) before starting, in case another session already picked this up.",
+      "Follow suggested_order above; test-first each item; run full suite; commit; push branch; update PR #5 body.",
+      "Live-confirm with a forked monitored mission, comparing stall/dead-code behavior against the pre-batch2 baseline."
+    ]
+  }
+}
