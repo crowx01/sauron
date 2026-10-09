@@ -81,7 +81,7 @@ async def run_task(
     m = _pick_tools_model(task, model)
     if not m:
         return {"task": task, "mode": "tools", "result": "__ERROR__no model available"}
-    steps = max_steps if max_steps else (8 if full else 5)
+    steps = chat_repl._adaptive_step_budget(task, max_steps if max_steps else (8 if full else 5))
 
     # A2: size guard — if the task is too large for this model's input cap,
     # reroute to a bigger-context same-category (or global-fallback) model.
