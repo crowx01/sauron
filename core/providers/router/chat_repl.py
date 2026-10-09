@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import sys
+import threading as _threading
 import time
 
 from rich.console import Console, Group
@@ -204,8 +205,6 @@ def _render_tools(transcript) -> None:
 
 
 # ---- Claude-style extras: cancel (F5), diff render (F1), context % (F2) -----
-import threading as _threading
-
 _CANCEL = _threading.Event()  # set to interrupt the in-flight turn (Esc / F5)
 
 
@@ -599,6 +598,96 @@ _TOOLS_SYS_FULL = (
 )
 
 
+_DIRECT_CLI_COMMANDS = {
+    "cargo", "docker", "gh", "git", "go", "make", "npm", "npx", "pip", "pip3",
+    "pnpm", "pytest", "python", "python3", "ruff", "terraform", "uv", "yarn",
+}
+_DIRECT_CLI_FENCE = re.compile(r"```(?:bash|sh|shell|zsh|console)?[ \t]*\n(.*?)```", re.IGNORECASE | re.DOTALL)
+_SHELL_CONTROL_RE = re.compile(r"[;&|<>`]|\$\(|\$\{")
+_DIRECT_CLI_INTENT = re.compile(
+    r"\b(?:please\s+)?(?:run|execute|perform)\s+"
+    r"(?:(?:all|each|these|this|the following|the)\s+)?"
+    r"(?:commands?|steps?|sequence|block)\b"
+    r"|\b(?:run|execute)\s+(?:exactly|in order)\b"
+    r"|\bcan you\s+(?:please\s+)?(?:run|execute)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_ordered_cli_commands(task: str) -> list[str]:
+    """Return a conservative, literal command list from an explicit shell fence.
+
+    Only one simple, allowlisted CLI invocation per line is accepted. Compound
+    shell syntax, prose, comments, and unknown commands make the whole block
+    ineligible; execution still goes through Toolbelt's authorization checks.
+    """
+    prompt = task or ""
+    if not _DIRECT_CLI_INTENT.search(prompt):
+        return []
+    stripped_prompt = prompt.lstrip().lower()
+    if stripped_prompt.startswith(("what ", "why ", "how ", "explain ", "should i ", "can i ", "could i ", "would i ")):
+        return []
+    if re.search(r"\bhow\s+to\s+run\b", prompt, re.IGNORECASE):
+        return []
+    commands: list[str] = []
+    for match in _DIRECT_CLI_FENCE.finditer(prompt):
+        block_commands: list[str] = []
+        for raw in match.group(1).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = re.sub(r"^(?:\d+[.)]\s+|[-*]\s+)", "", line)
+            if line.startswith("$ "):
+                line = line[2:].strip()
+            if not line or _SHELL_CONTROL_RE.search(line):
+                return []
+            try:
+                parts = shlex.split(line)
+            except ValueError:
+                return []
+            if not parts or os.path.basename(parts[0]) not in _DIRECT_CLI_COMMANDS:
+                return []
+            block_commands.append(line)
+        if len(block_commands) >= 2:
+            commands.extend(block_commands)
+    # Avoid partially executing a long prompt with multiple unrelated fences.
+    if len(commands) < 2 or len(commands) > 16:
+        return []
+    return commands
+
+
+def _adaptive_step_budget(task: str, base_steps: int) -> int:
+    """Scale the model turn budget for an explicit ordered CLI sequence."""
+    commands = _parse_ordered_cli_commands(task)
+    if not commands:
+        return base_steps
+    try:
+        factor = max(1, int(os.getenv("PAL_TOOLS_SEQUENCE_STEP_FACTOR", "3")))
+        limit = max(base_steps, int(os.getenv("PAL_TOOLS_STEP_LIMIT", "30")))
+    except (TypeError, ValueError):
+        factor, limit = 3, max(base_steps, 30)
+    return min(limit, max(base_steps, factor * len(commands)))
+
+
+def _tool_call_signature(name: str, args: dict, cwd: str) -> str:
+    """Stable signature for duplicate detection, including bash cwd normalization."""
+    try:
+        if name == "write_file":
+            path = args.get("path") or args.get("file") or args.get("filename") or ""
+            return f"write_file:{path}"
+        if name == "bash":
+            key = "command" if "command" in args else ("cmd" if "cmd" in args else None)
+            command = str(args.get(key) or "").strip() if key else ""
+            prefix = f"cd {shlex.quote(cwd)} && "
+            if command.startswith(prefix):
+                command = command[len(prefix):].strip()
+            normalized = re.sub(r"\s+", " ", command)
+            return f"bash:{normalized}"
+        return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    except Exception:
+        return f"{name}:{args!r}"
+
+
 async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, full: bool = False,
                       history_preamble: str = "", system_preamble: str = "", on_tool=None):
     """ReAct loop calling the provider directly (not the chat tool, which blocks
@@ -619,6 +708,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     schema = tb.react_schema()
     if not schema:
         return ("__ERROR__no local tools enabled", [])
+    max_steps = _adaptive_step_budget(task, max_steps)
     prov = ModelProviderRegistry.get_provider_for_model(model)
     if prov is None:
         return (f"__ERROR__no provider for {model}", [])
@@ -660,10 +750,52 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     convo = f"{history_preamble}{task}" if history_preamble else task
     transcript: list[tuple[str, dict, str]] = []
     last = ""
-    seen_calls: set[str] = set()  # (name,args) signatures already run this loop
+    seen_calls: dict[str, str] = {}  # signature -> actual result from its first execution
     nudges = 0
     _MAX_NUDGES = int(os.getenv("PAL_REASONING_GUARD_NUDGES", "2"))
     try:
+        direct_commands = _parse_ordered_cli_commands(task)
+        if (
+            direct_commands
+            and os.getenv("PAL_TOOLS_DIRECT_SEQUENCE", "1").strip().lower() not in ("0", "false", "no")
+        ):
+            direct_results = []
+            for command in direct_commands:
+                args = {"command": f"cd {shlex.quote(cwd)} && {command}"}
+                sig = _tool_call_signature("bash", args, cwd)
+                if sig in seen_calls:
+                    result = f"(replay guard: already executed; recorded result: {seen_calls[sig]})"
+                else:
+                    try:
+                        result = tb.execute("bash", args, caller_model=model)
+                    except Exception as exc:
+                        result = f"error: {exc}"
+                if not (result or "").strip():
+                    result = "(command executed; no stdout captured)"
+                seen_calls[sig] = str(result)
+                transcript.append(("bash", args, str(result)))
+                if on_tool:
+                    on_tool("bash", args, str(result))
+                direct_results.append(react.format_result("bash", str(result)))
+                exit_match = re.search(r"\[exit=(-?\d+)\]\s*$", str(result))
+                failed = str(result).lstrip().lower().startswith("error:") or (
+                    exit_match is not None and int(exit_match.group(1)) != 0
+                )
+                if failed:
+                    remaining = len(direct_commands) - len(direct_results)
+                    if remaining:
+                        direct_results.append(react.format_result(
+                            "bash",
+                            f"sequence stopped after a failed command; {remaining} later command(s) were skipped",
+                        ))
+                    break
+            convo = (
+                f"{convo}\n\n[The explicit ordered CLI commands below have already been run "
+                "once through the normal tool authorization layer. Do not repeat them; use "
+                "their recorded results and continue with the next task step.]\n"
+                + "\n".join(direct_results)
+            )
+
         for _ in range(max_steps):
             # trim accumulated context to fit the token budget: keep the task
             # (head) and the most recent tool output (tail), drop the middle.
@@ -730,34 +862,21 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                         if args.get(_pk) and not os.path.isabs(str(args[_pk])):
                             args = {**args, _pk: os.path.join(cwd, args[_pk])}
                             break
-                # Idempotency guard: never run the SAME call twice in one loop. A
-                # backgrounded/GUI launch returns no stdout, so the model can't tell
-                # it worked and re-emits it every step -- spawning many copies.
-                # B1: for write_file we key the signature on the PATH ALONE (ignore
-                # content) so a re-write of the same file with tweaked content is
-                # ALSO caught -- that slip-through was the #1 cause of the rewrite
-                # spiral where a model rewrites one file every step until it runs out.
-                try:
-                    if name == "write_file":
-                        _wp = args.get("path") or args.get("file") or args.get("filename") or ""
-                        sig = f"write_file:{_wp}"
-                    else:
-                        sig = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
-                except Exception:
-                    sig = f"{name}:{args!r}"
+                # Exact-call guard: return the real prior output (including errors)
+                # so a weak model can advance to the next ordered precondition.
+                sig = _tool_call_signature(name, args, cwd)
                 if sig in seen_calls:
+                    prior = seen_calls[sig]
                     res = (
-                        "(already executed this exact command earlier in this "
-                        "session — it succeeded; do NOT run it again. If it was a "
-                        "launch/background command the process is already running. "
-                        "Give your final answer now with NO tool_call.)"
+                        f"(replay guard: this exact call already ran; do not repeat it. "
+                        f"Recorded result: {str(prior)[:1200]}. Use that result and "
+                        "continue with the next listed step, or explain why it cannot proceed.)"
                     )
                     transcript.append((name, args, res))
                     if on_tool:
                         on_tool(name, args, res)
                     results.append(react.format_result(name, res))
                     continue
-                seen_calls.add(sig)
                 try:
                     res = tb.execute(name, args, caller_model=model)
                 except Exception as exc:
@@ -768,6 +887,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                     res = ("(command executed; no stdout captured. For a "
                            "backgrounded or GUI launch this means it started "
                            "successfully — do not repeat it.)")
+                seen_calls[sig] = str(res)
                 transcript.append((name, args, res))
                 if on_tool:
                     on_tool(name, args, res)

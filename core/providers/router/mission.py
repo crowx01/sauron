@@ -15,11 +15,18 @@ Claude is never selected. No database; a hard iteration cap prevents loops.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import hashlib
+import importlib.util
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +40,15 @@ _WRITER_SYS = (
     '"edits":[{"path":"...","old":"exact snippet from the file","new":"replacement"}],'
     '"commands":["..."],"verify":["read-only bash check that EXITS 0 iff a '
     'criterion holds"],"rationale":"...","done_hint":false}\n'
-    "Use edits to MODIFY existing files: old must match the current file text "
-    "exactly and be small+unique; use files only for NEW files; commands run bash "
-    "on Kali. Preserve all unrelated code.\n"
+    "For code, prefer seeded small edits to existing files over authoring from "
+    "scratch. When changing a code file, prefer a WHOLE-FILE replacement in files[] "
+    "so the executor can validate the complete result; files[] may create or replace "
+    "a file. Keep edits[] only for tiny, unique surgical changes where a full-file "
+    "replacement is unnecessary. Preserve unrelated code and existing conventions. "
+    "Any new top-level function/class must have a real invocation/call-site in the "
+    "resulting code or tests; acceptance checks this with a simple grep.\n"
+    "commands run bash on Kali. If a prior iteration reports syntax/import/lint or "
+    "missing-call-site errors, fix those errors before proposing more work.\n"
     "verify: one read-only command per acceptance criterion that a machine runs — "
     "its EXIT CODE is the proof (e.g. `test -f out.xlsx`, `grep -q foo file`, "
     "`python -m pytest -q path`). For a measurement/probe criterion, verify with a "
@@ -54,7 +67,8 @@ _JUDGE_SYS = (
     '{"decision":"COMPLETE","reason":"...","feedback":"..."}\n'
     'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when the RESULTS show '
     "real changes on disk (files_written / edits_applied / command output) AND "
-    "every verify check exited 0. Never infer success from the writer's prose or a "
+    "every verify check exited 0, every code check passed, and every new callable "
+    "has a grep-visible call-site. Never infer success from the writer's prose or a "
     "claim that work was done — only from the executor's recorded evidence. If "
     "nothing was written or a verify failed, CONTINUE with concrete feedback."
 )
@@ -279,28 +293,60 @@ def _rank_for_role(role: str, roster: list[str]) -> list[str]:
 def _repo_context(goal: str, max_bytes: int = 18000) -> str:
     """Current content of repo files relevant to the goal (headroom-compressed),
     so the writer modifies real code instead of guessing."""
-    import subprocess
-
     files: list[str] = []
-    for p in re.findall(r"(/[\w./\-]+\.(?:py|json|md|txt|toml|cfg))", goal):
-        if os.path.isfile(p) and p not in files:
-            files.append(p)
-    root = None
-    rm = re.search(r"(/[\w./\-]+?pal-mcp-server)\b", goal)
-    if rm and os.path.isdir(rm.group(1)):
-        root = rm.group(1)
+    roots = [Path.cwd()]
+    named_root = None
+    named_match = re.search(r"(/[\w./\-]+?pal-mcp-server)\b", goal or "")
+    if named_match and os.path.isdir(named_match.group(1)):
+        named_root = Path(named_match.group(1))
+        roots.extend((named_root, named_root / "core"))
+    try:
+        repo_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.getcwd(), capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        if repo_root:
+            roots.extend((Path(repo_root), Path(repo_root) / "core"))
+    except Exception:
+        repo_root = ""
+    roots = list(dict.fromkeys(p.resolve() for p in roots if p.is_dir()))
+
+    path_pattern = re.compile(
+        r"(?<![\w./-])(?:/[\w./-]+|(?:[\w.-]+/)*[\w.-]+)"
+        r"\.(?:py|json|md|txt|toml|cfg)\b"
+    )
+    for raw_path in path_pattern.findall(goal or ""):
+        candidates = [Path(raw_path)] if os.path.isabs(raw_path) else [root / raw_path for root in roots]
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+                if resolved.is_file() and str(resolved) not in files:
+                    files.append(str(resolved))
+                    break
+            except Exception:
+                pass
+
+    # Continue to discover symbol-bearing files for named project roots and
+    # normal git checkouts, but keep the search limited to source/config roots.
+    root = Path(repo_root) if repo_root else named_root
     if root:
         symbols = set(re.findall(r"\b([a-z]+_[a-z_]+|[A-Za-z]+[A-Z][A-Za-z]+)\b", goal))
         for sym in list(symbols)[:8]:
             try:
-                targets = [os.path.join(root, "providers"), os.path.join(root, "conf"),
-                           os.path.join(root, "server.py"), os.path.join(root, "cli.py")]
-                targets = [t for t in targets if os.path.exists(t)]
+                targets = []
+                for base in (root, root / "core"):
+                    targets.extend(
+                        base / item
+                        for item in ("providers", "conf", "server.py", "cli.py")
+                        if (base / item).exists()
+                    )
                 out = subprocess.run(
                     ["grep", "-rlw", "--include=*.py", "--exclude-dir=.pal_venv",
                      "--exclude-dir=zen-mcp-server", "--exclude-dir=__pycache__",
-                     "--exclude-dir=node_modules", "--exclude-dir=tests", sym, *targets],
-                    capture_output=True, text=True, timeout=8).stdout
+                     "--exclude-dir=node_modules", "--exclude-dir=tests", sym,
+                     *map(str, targets)],
+                    capture_output=True, text=True, timeout=8,
+                ).stdout
                 for hit in out.split()[:2]:
                     if hit not in files:
                         files.append(hit)
@@ -308,13 +354,11 @@ def _repo_context(goal: str, max_bytes: int = 18000) -> str:
                 pass
             if len(files) >= 6:
                 break
-    # RAW content (never compressed): the writer emits exact old->new edit
-    # snippets that must match the file byte-for-byte, so compression would
-    # break edit matching. Cap total size to stay within budget.
+    # Keep source readable and uncompressed so a writer can seed an accurate edit.
     parts, total = [], 0
     for fp in files[:6]:
         try:
-            c = open(fp).read()
+            c = Path(fp).read_text(encoding="utf-8", errors="replace")
             if len(c) > max_bytes:
                 c = c[:max_bytes] + "\n...[truncated]..."
             parts.append(f"--- FILE {fp} ---\n{c}")
@@ -346,6 +390,285 @@ def _is_protected(path: str) -> bool:
     except Exception:
         pass
     return False
+
+
+def _python_search_roots(path: str | None = None) -> list[Path]:
+    """Small set of likely source roots for import and call-site checks."""
+    roots = [Path.cwd()]
+    if path:
+        roots.append(Path(path).resolve().parent)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.getcwd(), capture_output=True, text=True, timeout=3,
+        )
+        repo = result.stdout.strip()
+        if result.returncode == 0 and repo:
+            roots.extend((Path(repo), Path(repo) / "core"))
+    except Exception:
+        pass
+    return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
+
+
+def _local_module_exists(module: str, roots: list[Path]) -> bool:
+    parts = [part for part in module.split(".") if part]
+    if not parts:
+        return False
+    for root in roots:
+        base = root.joinpath(*parts)
+        if base.with_suffix(".py").is_file() or (base / "__init__.py").is_file():
+            return True
+    return False
+
+
+def _check_python_imports(tree: ast.AST, path: str) -> list[dict]:
+    """Check imports without executing the edited module or its package code."""
+    roots = _python_search_roots(path)
+    checked: set[str] = set()
+    issues: list[dict] = []
+    stdlib = getattr(sys, "stdlib_module_names", set())
+
+    for node in ast.walk(tree):
+        modules: list[str] = []
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = Path(path).resolve().parent
+                for _ in range(max(0, node.level - 1)):
+                    base = base.parent
+                if node.module:
+                    local = base.joinpath(*node.module.split("."))
+                    if not (local.with_suffix(".py").is_file() or local.is_dir()):
+                        issues.append({
+                            "check": "import",
+                            "ok": False,
+                            "message": f"unresolved relative import: {node.module}",
+                        })
+                else:
+                    init_path = base / "__init__.py"
+                    try:
+                        init_source = init_path.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        init_source = ""
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        local = base / alias.name
+                        exported = bool(re.search(rf"\b{re.escape(alias.name)}\b", init_source))
+                        if not (local.with_suffix(".py").is_file() or local.is_dir() or exported):
+                            issues.append({
+                                "check": "import",
+                                "ok": False,
+                                "message": f"unresolved relative import: {alias.name}",
+                            })
+                continue
+            elif node.module:
+                modules.append(node.module)
+        for module in modules:
+            if not module or module in checked:
+                continue
+            checked.add(module)
+            top = module.split(".")[0]
+            if top in stdlib or top in sys.builtin_module_names or _local_module_exists(module, roots):
+                continue
+            try:
+                available = importlib.util.find_spec(top) is not None
+            except (ImportError, ValueError, AttributeError):
+                available = False
+            if not available:
+                issues.append({
+                    "check": "import",
+                    "ok": False,
+                    "message": f"unresolved import: {module}",
+                })
+    if not issues:
+        issues.append({"check": "import", "ok": True, "message": "imports resolve"})
+    return issues
+
+
+def _check_python_file(path: str) -> list[dict]:
+    """AST/compile, non-executing import resolution, and optional Ruff validation."""
+    if not path.lower().endswith(".py"):
+        return []
+    try:
+        source = Path(path).read_text(encoding="utf-8")
+    except Exception as exc:
+        return [{"check": "read", "ok": False, "message": str(exc)[:300]}]
+
+    try:
+        tree = ast.parse(source, filename=path)
+        compile(tree, path, "exec")
+    except (SyntaxError, ValueError, TypeError) as exc:
+        line = getattr(exc, "lineno", None)
+        where = f" at line {line}" if line else ""
+        return [{
+            "check": "ast",
+            "ok": False,
+            "message": f"syntax/compile error{where}: {str(exc)[:300]}",
+        }]
+
+    checks = [{"check": "ast", "ok": True, "message": "AST parse and compile passed"}]
+    checks.extend(_check_python_imports(tree, path))
+    ruff = shutil.which("ruff")
+    if ruff:
+        try:
+            result = subprocess.run(
+                [ruff, "check", "--output-format", "concise", path],
+                cwd=os.getcwd(), capture_output=True, text=True, timeout=30,
+            )
+            detail = (result.stdout + result.stderr).strip()[-1200:]
+            checks.append({
+                "check": "ruff",
+                "ok": result.returncode == 0,
+                "message": detail or ("ruff passed" if result.returncode == 0 else "ruff failed"),
+            })
+        except Exception as exc:
+            checks.append({"check": "ruff", "ok": False, "message": f"ruff error: {str(exc)[:240]}"})
+    else:
+        checks.append({"check": "ruff", "ok": True, "message": "ruff unavailable; skipped"})
+    return checks
+
+
+def _new_top_level_callables(before: str, after: str) -> list[str]:
+    """Callable symbols added to a Python module by this edit."""
+    def names(source: str) -> set[str]:
+        try:
+            module = ast.parse(source or "")
+        except SyntaxError:
+            return set()
+        return {
+            node.name for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+
+    return sorted(names(after) - names(before))
+
+
+def _find_symbol_calls(symbols: list[str], changed_paths: list[str]) -> set[str]:
+    """Find grep-form call-sites for several symbols in one source-tree pass."""
+    if not symbols:
+        return set()
+    alternatives = "|".join(re.escape(symbol) for symbol in sorted(set(symbols), key=len, reverse=True))
+    pattern = re.compile(rf"\b(?P<symbol>{alternatives})\s*\(")
+    roots = _python_search_roots(changed_paths[0] if changed_paths else None)
+    files: set[Path] = set()
+    for root in roots:
+        for directory, dirs, names in os.walk(root):
+            dirs[:] = [
+                name for name in dirs
+                if name not in {".git", ".venv", ".sauron_venv", ".pal_venv", "__pycache__",
+                                "node_modules", "build", "dist"}
+            ]
+            for name in names:
+                if name.endswith(".py"):
+                    files.add(Path(directory) / name)
+    files.update(Path(path).resolve() for path in changed_paths if path.lower().endswith(".py"))
+
+    found: set[str] = set()
+    expected = set(symbols)
+    for file_path in files:
+        try:
+            for line in file_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#") or re.match(r"^(?:async\s+)?def\s+", stripped):
+                    continue
+                found.update(match.group("symbol") for match in pattern.finditer(line))
+                if found >= expected:
+                    return found
+        except OSError:
+            continue
+    return found
+
+
+def _has_symbol_call(symbol: str, changed_paths: list[str]) -> bool:
+    """Cheap grep-form call-site check; definitions and comment-only lines do not count."""
+    return symbol in _find_symbol_calls([symbol], changed_paths)
+
+
+def _record_code_validation(report: dict, path: str, before: str) -> None:
+    checks = _check_python_file(path)
+    report["code_checks"].extend({"path": path, **check} for check in checks)
+    if any(not check.get("ok", False) for check in checks):
+        return
+    try:
+        after = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return
+    symbols = _new_top_level_callables(before, after)
+    called_symbols = _find_symbol_calls(symbols, [path])
+    for symbol in symbols:
+        called = symbol in called_symbols
+        report["symbol_checks"].append({
+            "path": path,
+            "symbol": symbol,
+            "check": "callsite",
+            "ok": called,
+            "message": "call-site found" if called else "new callable has no grep-visible call-site",
+        })
+
+
+def _progress_fingerprint(report: dict) -> str:
+    """Stable signature of observable progress/evidence for consecutive iterations."""
+    def compact(value) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    payload = {
+        "changes": sorted(
+            (compact(x.get("path")), compact(x.get("sha256")))
+            for x in report.get("changes", []) or []
+        ),
+        "verify_failures": sorted(
+            (compact(x.get("cmd")), compact(x.get("exit")), compact(x.get("output")))
+            for x in report.get("verify", []) or [] if not x.get("ok")
+        ),
+        "code_failures": sorted(
+            (compact(x.get("path")), compact(x.get("check")), compact(x.get("message")))
+            for x in report.get("code_checks", []) or [] if not x.get("ok")
+        ),
+        "symbol_failures": sorted(
+            (compact(x.get("path")), compact(x.get("symbol")))
+            for x in report.get("symbol_checks", []) or [] if not x.get("ok")
+        ),
+        "command_results": sorted(
+            (compact(x.get("cmd")), compact(x.get("answer")))
+            for x in report.get("results", []) or []
+        ),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _no_progress_limit() -> int:
+    try:
+        configured = int(os.getenv("PAL_MISSION_NOPROGRESS_ITERS", "2"))
+    except (TypeError, ValueError):
+        configured = 2
+    return 0 if configured <= 0 else max(2, configured)
+
+
+def _panel_no_progress_reason(results: list[dict], threshold: int = 2) -> str:
+    """Detect duplicate failed checks across panel workers that made no disk progress."""
+    if threshold <= 0:
+        return ""
+    failures: dict[tuple[str, str, str], int] = {}
+    for result in results:
+        report = result.get("exec") or {}
+        if report.get("changes"):
+            continue
+        for check in report.get("verify", []) or []:
+            if check.get("ok"):
+                continue
+            key = (
+                re.sub(r"\s+", " ", str(check.get("cmd") or "")).strip(),
+                str(check.get("exit")),
+                re.sub(r"\s+", " ", str(check.get("output") or "")).strip(),
+            )
+            failures[key] = failures.get(key, 0) + 1
+    repeated = next((key for key, count in failures.items() if count >= threshold), None)
+    if repeated:
+        return f"repeated failing verification with no forward progress: {repeated[0]}"
+    return ""
 
 
 async def _panel_models(mtype: str, cap: int) -> list[str]:
@@ -456,11 +779,15 @@ async def run_panel(goal, models, judge, full):
     except Exception as exc:  # noqa: BLE001
         synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
 
-    merged = {"files_written": [], "edits_applied": [], "results": [], "verify": []}
+    merged = {
+        "files_written": [], "edits_applied": [], "results": [], "verify": [],
+        "code_checks": [], "symbol_checks": [], "changes": [],
+    }
     for r in results:
         rep = r.get("exec") or {}
         for k in merged:
             merged[k].extend(rep.get(k, []) or [])
+    no_progress_reason = _panel_no_progress_reason(results, _no_progress_limit())
     # judge is guarded: if the judge model is down, decide from deterministic
     # evidence so a mission whose verify already passed still COMPLETEs.
     try:
@@ -475,12 +802,21 @@ async def run_panel(goal, models, judge, full):
         log.warning("mission: judge failed (%s) → deterministic verdict", str(exc)[:120])
         verdict = _gate_verdict(goal, merged)
     verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
+    if no_progress_reason:
+        verdict = {
+            "decision": "CONTINUE",
+            "reason": "panel no-progress guard",
+            "feedback": no_progress_reason,
+            "no_progress": True,
+        }
     contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
     return {
         "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
         "mode": "panel", "team_size": len(models), "models": models,
         "subtasks": subs, "results": results, "judge": judge, "verdict": verdict,
         "synthesizer": synth, "synthesis": synthesis, "contributors": contributors,
+        "no_progress": bool(no_progress_reason),
+        **({"no_progress_reason": no_progress_reason} if no_progress_reason else {}),
     }
 
 
@@ -500,7 +836,22 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
     except Exception:
         _gtok = None
 
-    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": [], "verify": []}
+    report: dict = {
+        "files_written": [], "edits_applied": [], "edits_failed": [],
+        "results": [], "verify": [], "code_checks": [], "symbol_checks": [], "changes": [],
+    }
+
+    def record_content_change(path: str, before: str) -> None:
+        try:
+            after = Path(path).read_text(encoding="utf-8", errors="replace")
+            if after != before:
+                report["changes"].append({
+                    "path": os.path.abspath(path),
+                    "sha256": hashlib.sha256(after.encode("utf-8")).hexdigest(),
+                })
+        except Exception:
+            pass
+
     for e in plan.get("edits", []) or []:
         path, old, new = e.get("path"), e.get("old"), e.get("new")
         if path and _is_protected(path):
@@ -508,11 +859,13 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
             continue
         if path and old is not None and os.path.isfile(path):
             try:
-                cur = open(path).read()
+                cur = Path(path).read_text(encoding="utf-8")
                 if old in cur:
-                    with open(path, "w") as fh:
+                    with open(path, "w", encoding="utf-8") as fh:
                         fh.write(cur.replace(old, new or "", 1))
                     report["edits_applied"].append(path)
+                    record_content_change(path, cur)
+                    _record_code_validation(report, path, cur)
                 else:
                     report["edits_failed"].append({"path": path, "reason": "old snippet not found"})
             except Exception as exc:
@@ -523,10 +876,16 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
             report["edits_failed"].append({"path": path, "reason": "protected path (config/creds)"})
             continue
         if path:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w") as fh:
-                fh.write(content)
-            report["files_written"].append(path)
+            try:
+                before = Path(path).read_text(encoding="utf-8", errors="replace") if os.path.isfile(path) else ""
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content if isinstance(content, str) else str(content))
+                report["files_written"].append(path)
+                record_content_change(path, before)
+                _record_code_validation(report, path, before)
+            except Exception as exc:
+                report["edits_failed"].append({"path": path, "reason": str(exc)[:120]})
     for cmd in plan.get("commands", []) or []:
         answer, _tr = await chat_repl._tools_loop(
             f"Run this exact bash command and report its output: {cmd}",
@@ -601,6 +960,14 @@ def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
     block. Goal-text artifact matching is only a FALLBACK for missions with no
     verify, because it greedily matches INPUT source paths named in the goal and
     would otherwise false-veto a genuinely complete mission (2026-10-08)."""
+    code_failures = [x for x in report.get("code_checks", []) or [] if not x.get("ok")]
+    if code_failures:
+        details = [x.get("message", "code validation failed") for x in code_failures[:4]]
+        return "CONTINUE", f"code check failure: {details}"
+    symbol_failures = [x for x in report.get("symbol_checks", []) or [] if not x.get("ok")]
+    if symbol_failures:
+        names = [x.get("symbol") for x in symbol_failures[:8]]
+        return "CONTINUE", f"new callable(s) lack a grep-visible call-site: {names}"
     ran, passed = _verify_tally(report)
     if ran:
         if passed < ran:
@@ -629,16 +996,19 @@ def _gate_verdict(goal: str, report: dict) -> dict:
 
 
 def _apply_gate(goal: str, report: dict, verdict: dict) -> dict:
-    """Downgrade a COMPLETE verdict to CONTINUE when the deterministic gate fails,
-    annotating the feedback so the next iteration gets a concrete reason."""
-    if str(verdict.get("decision", "")).upper() != "COMPLETE":
-        return verdict
+    """Enforce deterministic checks and feed their precise failures to the writer."""
     forced, why = _deterministic_gate(goal, report)
-    if forced == "CONTINUE":
+    if forced == "CONTINUE" and str(verdict.get("decision", "")).upper() == "COMPLETE":
         log.warning("mission: deterministic gate overrode judge COMPLETE → CONTINUE (%s)", why)
         fb = (verdict.get("feedback", "") or "").strip()
         return {"decision": "CONTINUE", "reason": verdict.get("reason", ""),
                 "feedback": f"{fb} [gate: {why}]".strip(), "gate_override": True}
+    if forced == "CONTINUE":
+        updated = dict(verdict)
+        fb = (updated.get("feedback", "") or "").strip()
+        if why and why not in fb:
+            updated["feedback"] = f"{fb} [gate: {why}]".strip()
+        return updated
     return verdict
 
 
@@ -696,7 +1066,7 @@ async def run_mission(
         used.add(executor)
 
     # EASY: one capable model does the whole thing directly via the tool loop.
-    if team["single"] and auto:
+    if team["single"] and auto and mtype != "code":
         solo = executor or writer
         answer, _tr = await chat_repl._tools_loop(goal, solo, os.getcwd(), max_steps=6, full=full)
         artifacts = _goal_artifacts(goal)
@@ -729,6 +1099,9 @@ async def run_mission(
     # writer WITHIN the same iteration instead of wasting it (deterministic-first).
     writer_tries = max(1, int(os.getenv("PAL_MISSION_WRITER_TRIES", "3")))
     writer_candidates = [writer] + [m for m in _writer_pool(mtype) if m != writer]
+    no_progress_limit = _no_progress_limit()
+    previous_fingerprint = None
+    repeated_fingerprint_count = 0
     for iteration in range(1, max_iters + 1):
         plan: dict = {}
         writer_used = writer
@@ -766,6 +1139,12 @@ async def run_mission(
         )
         verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE", "feedback": "no verdict"}
         verdict = _apply_gate(goal, report, verdict)  # deterministic override of hallucinated COMPLETE
+        fingerprint = _progress_fingerprint(report)
+        if fingerprint == previous_fingerprint:
+            repeated_fingerprint_count += 1
+        else:
+            repeated_fingerprint_count = 1
+        previous_fingerprint = fingerprint
         transcript.append({"iteration": iteration, "writer": writer_used, "executor": executor,
                            "reviewers": reviewer_models, "judge": judge, "plan": plan,
                            "exec": report, "reviews": review_notes, "verdict": verdict})
@@ -774,6 +1153,19 @@ async def run_mission(
                     "assessment": assessment, "team_size": 3 + len(reviewer_models),
                     "writer": writer, "executor": executor, "reviewers": reviewer_models,
                     "judge": judge, "transcript": transcript}
+        if no_progress_limit and repeated_fingerprint_count >= no_progress_limit:
+            reason = (
+                f"no forward progress for {repeated_fingerprint_count} consecutive iterations; "
+                "the executor evidence and failing checks repeated"
+            )
+            log.warning("mission: %s", reason)
+            return {
+                "status": "INCOMPLETE", "mode": "team", "iterations": iteration,
+                "assessment": assessment, "team_size": 3 + len(reviewer_models),
+                "writer": writer, "executor": executor, "reviewers": reviewer_models,
+                "judge": judge, "transcript": transcript,
+                "no_progress": True, "no_progress_reason": reason,
+            }
         feedback = verdict.get("feedback", "")
 
     return {"status": "INCOMPLETE", "mode": "team", "iterations": max_iters,
