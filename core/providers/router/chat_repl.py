@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover - degrade to plain input if not installe
 
 console = Console()
 
-# ---- Claude-Code-style interaction layer -----------------------------------
+# ---- interactive chat controls ---------------------------------------------
 # Permission modes cycled with Shift+Tab (shown in the bottom toolbar):
 #   auto       every message runs with full tools (no prompt)
 #   ask        confirm once before a message runs with full tools
@@ -88,11 +88,12 @@ class _ReplState:
     """Shared mutable UI state the prompt session, bottom toolbar and the main
     loop all read (perm mode, current model, cwd)."""
 
-    def __init__(self, model: str | None, cwd: str):
+    def __init__(self, model: str | None, cwd: str, session_id: str = ""):
         perm = (os.getenv("PAL_CHAT_PERM", "auto") or "auto").strip().lower()
         self.perm = perm if perm in _PERM_MODES else "auto"
         self.model = model
         self.cwd = cwd
+        self.session_id = session_id
         self.ctx_pct = 0      # % of context window used (F2)
         self.queued = 0       # messages queued while a turn runs (F4)
         self.busy = False     # a turn is in flight (F4/F5)
@@ -103,10 +104,51 @@ class _ReplState:
 
 _SLASH_CMDS = (
     "/help", "/status", "/context", "/history", "/compact", "/clear", "/resume",
+    "/sessions",
     "/model", "/models", "/ask", "/cheap", "/smart", "/agent", "/agent:edit",
     "/agent:plan", "/agent:review", "/delegate", "/debate", "/tools", "/tools:ro",
     "/plan", "/mission", "/exit",
 )
+
+_PALETTE_CHOICES = (
+    ("New conversation", "/clear", "Start a fresh chat; the saved session stays available", "Session"),
+    ("Switch session", "/sessions", "Search and resume a recent saved conversation", "Session"),
+    ("Choose model", "/model", "Search available models or return to automatic routing", "Model"),
+    ("Browse model catalog", "/models", "View model capabilities and availability", "Model"),
+    ("Show status", "/status", "Inspect engine, storage, and execution mode", "Sauron"),
+    ("Show context", "/context", "Inspect this session's context and working directory", "Session"),
+    ("Show conversation history", "/history", "Review messages in the current session", "Session"),
+    ("Compact context", "/compact", "Summarize older turns while keeping recent context", "Session"),
+    ("Ask without tools", "/ask ", "Add a question to send without tools", "Chat"),
+    ("Fast answer", "/cheap ", "Add a question for the fast model route", "Chat"),
+    ("Reasoned answer", "/smart ", "Add a question for the stronger model route", "Chat"),
+    ("Run an agent task", "/agent ", "Add a task for the local agent", "Agent"),
+    ("Plan a task", "/plan ", "Add a goal to plan and execute", "Agent"),
+    ("Review a task", "/debate ", "Add a question for a multi-model review", "Agent"),
+    ("Show help", "/help", "List commands and keyboard shortcuts", "Sauron"),
+    ("Exit chat", "/exit", "Close the chat session", "Sauron"),
+)
+
+
+def _filter_picker_choices(choices, query: str):
+    """Filter (label, value, description, category) choices by every query word."""
+    terms = (query or "").casefold().split()
+    if not terms:
+        return list(choices)
+
+    ranked = []
+    for choice in choices:
+        fields = tuple(str(part).casefold() for part in choice)
+        if not all(any(term in field for field in fields) for term in terms):
+            continue
+        label = fields[0]
+        score = sum(
+            0 if label.startswith(term) else 1 if term in label else 2
+            for term in terms
+        )
+        ranked.append((score, choice))
+    ranked.sort(key=lambda item: item[0])
+    return [choice for _, choice in ranked]
 
 if _PT_OK:
 
@@ -177,9 +219,9 @@ def _print_tool(name, args, res) -> None:
         ):
             path = args.get("path") or args.get("file") or args.get("file_path") or name
             if args.get("diff"):
-                console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _CC_DIM)))
+                console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _UI_DIM)))
                 console.print(_answer_block(_colorize_diff(str(args["diff"])),
-                                            marker="⎿", marker_style=_CC_DIM))
+                                            marker="⎿", marker_style=_UI_DIM))
                 return
             before = args.get("before", args.get("old_str", ""))
             after = args.get("after", args.get("new_str", ""))
@@ -228,9 +270,9 @@ def _colorize_diff(diff: str, *, limit: int = 40):
         elif ln.startswith("@@"):
             out.append(ln + "\n", style="cyan")
         else:
-            out.append(ln + "\n", style=_CC_DIM)
+            out.append(ln + "\n", style=_UI_DIM)
     if len(lines) > limit:
-        out.append(f"… (+{len(lines) - limit} more)", style=_CC_DIM)
+        out.append(f"… (+{len(lines) - limit} more)", style=_UI_DIM)
     return out
 
 
@@ -238,14 +280,14 @@ def _render_diff(path: str, before: str, after: str) -> None:
     """Claude-style edit header + colored unified diff under a '⎿' gutter."""
     import difflib
 
-    console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _CC_DIM)))
+    console.print(Text.assemble(("⏺ ", _ACCENT), (f"Update({path})", _UI_DIM)))
     diff = "\n".join(difflib.unified_diff(
         (before or "").splitlines(), (after or "").splitlines(), lineterm="", n=2,
     ))
     if not diff.strip():
-        console.print(Text("  ⎿ (no changes)", style=_CC_DIM))
+        console.print(Text("  ⎿ (no changes)", style=_UI_DIM))
         return
-    console.print(_answer_block(_colorize_diff(diff), marker="⎿", marker_style=_CC_DIM))
+    console.print(_answer_block(_colorize_diff(diff), marker="⎿", marker_style=_UI_DIM))
 
 
 _CTX_WINDOW_DEFAULT = int(os.getenv("PAL_CHAT_CTX_WINDOW", "128000"))
@@ -944,11 +986,9 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     return last_ans, last_transcript, last_model
 
 
-# ---- minimal monochrome visual language ------------------------------------
-# Claude-Code-like restraint: default foreground for the assistant's words,
-# dim/grey for everything secondary (tool trace, notices, meta), one muted
-# accent reserved for the prompt marker and logo, red only for errors.
-_ACCENT = "#d77757"  # Claude Code brand terracotta (extracted from the CLI)
+# ---- Sauron terminal visual language ---------------------------------------
+# Neutral transcript and tool output, one warm brand accent, and red for errors.
+_ACCENT = "#ff8a1c"
 
 
 def _note(msg: str, kind: str = "sys") -> None:
@@ -960,32 +1000,26 @@ def _note(msg: str, kind: str = "sys") -> None:
 
 
 def _echo_user(line: str) -> None:
-    """Echo the submitted message as Claude Code does: a full-width highlighted
-    bar ('❯ <msg>' on a dim background), then a blank line before the answer.
-    (The input box is erased on submit, so the turn needs its own record of
-    what was asked.)"""
+    """Record the submitted message in the transcript with a clear user marker."""
     width = console.width or 80
     for i, part in enumerate(line.split("\n")):
         body = f"{'❯' if i == 0 else ' '} {part}"
         row = Text.assemble(
-            (f"{'❯' if i == 0 else ' '} ", "#6e6e6e"), (part, "bold"),
+            (f"{'❯' if i == 0 else ' '} ", _ACCENT), (part, "bold"),
         )
         row.pad_right(max(0, width - len(body)))  # fill the row edge-to-edge
-        console.print(row, style="on #2a2a2a")    # full-width highlight bar
-    console.print()                                # blank line, like Claude
-
-
-_DONE_VERBS = ("Cooked", "Routed", "Herded", "Brewed", "Forged", "Wrangled")
+        console.print(row, style="on #22252a")
+    console.print()                                # separate prompt from assistant response
 
 
 def _done_footer(t0: float) -> None:
-    """Claude-Code completion line: '✻ Cooked for 2s · done 8:02 PM' (dim)."""
-    import random
-
+    """One quiet completion line after each response."""
     secs = max(0, round(time.monotonic() - t0))
-    stamp = time.strftime("%-I:%M %p") if os.name != "nt" else time.strftime("%I:%M %p")
-    verb = random.choice(_DONE_VERBS)
-    console.print(f"[#6e6e6e]✻ {verb} for {secs}s  ·  done {stamp}[/]")
+    stamp = time.strftime("%H:%M")
+    console.print(Text.assemble(
+        ("✓ ", _ACCENT),
+        (f"completed in {secs}s  ·  {stamp}", _UI_DIM),
+    ))
     console.print()
 
 
@@ -1006,7 +1040,7 @@ _ANSWER_IND = "  "  # 2 cols, the width of the '● ' marker — the hanging ind
 def _answer_block(renderable, *, marker: str = "●", marker_style: str = _ACCENT):
     """Wrap an assistant answer so the '●' sits in a 2-col gutter and EVERY line
     of the body (including wrapped ones) aligns under the first line's text —
-    Claude Code's hanging-indent layout."""
+    keeping a consistent hanging indent."""
     from rich.table import Table
 
     grid = Table.grid(padding=0)
@@ -1044,7 +1078,7 @@ def _est_tokens(text: str) -> int:
     return max(0, len(text) // 4)
 
 
-_SPIN_FRAMES = ("✶", "✳", "✻", "✽", "✻", "✳")  # pulsing star, like Claude's spinner
+_SPIN_FRAMES = ("◌", "◔", "◑", "◕", "●", "◕", "◑", "◔")
 
 
 def _status_line(t0: float, text: str, verb: str, phrase: str | None = None):
@@ -1056,8 +1090,8 @@ def _status_line(t0: float, text: str, verb: str, phrase: str | None = None):
     secs = max(0, int(elapsed))
     glyph = _SPIN_FRAMES[int(elapsed * 6) % len(_SPIN_FRAMES)]  # ~6 fps animation
     return Text.assemble(
-        (f"{glyph} {verb}… ", _CC_ACCENT),
-        (f"({_elapsed_str(secs)}  ·  ↓ {_fmt_tokens(_est_tokens(text))} tokens  ·  {phrase})", _CC_DIM),
+        (f"{glyph} {verb}… ", _UI_ACCENT),
+        (f"({_elapsed_str(secs)}  ·  ↓ {_fmt_tokens(_est_tokens(text))} tokens  ·  {phrase})", _UI_DIM),
     )
 
 
@@ -1526,27 +1560,35 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
     )
 
 
-# Real Claude Code theme values (extracted from the installed CLI binary):
-#   brand accent #d77757 · dim grey #6e6e6e · amber #f59e0b · text #f2f3f5
-_CC_ACCENT = "#d77757"
-_CC_DIM = "#6e6e6e"
-_CC_AMBER = "#f59e0b"
-_FS_GUTTER = 2  # left margin between the pane edge and content, like Claude Code
+# Sauron terminal colors: orange accent, neutral secondary text, dark surfaces.
+_UI_ACCENT = _ACCENT
+_UI_DIM = "#858b95"
+_FS_GUTTER = 2  # comfortable spacing from each edge of the terminal
 
 
 def _box_style():
-    """Claude-Code input chrome: thin dim-grey rounded border + dim footer."""
+    """Sauron input chrome and command-picker colors."""
     from prompt_toolkit.styles import Style
 
     return Style.from_dict({
         "input-frame": "",
-        "input-frame frame.border": f"fg:{_CC_DIM} noinherit",  # thin dim-grey box
-        "text-area.prompt": f"fg:{_CC_ACCENT}",                 # the '> ' marker
+        "input-frame frame.border": f"fg:{_UI_DIM} noinherit",
+        "text-area.prompt": f"fg:{_UI_ACCENT}",
+        "palette.frame": "bg:#181b1f fg:#f2f3f5",
+        "palette.frame.border": "fg:#565b66",
+        "palette.title": f"bold fg:{_UI_ACCENT}",
+        "palette.hint": f"fg:{_UI_DIM}",
+        "palette.input": "fg:#f2f3f5 bg:#252a31",
+        "palette.input.prompt": f"fg:{_UI_ACCENT} bg:#252a31",
+        "palette.list": "bg:#181b1f",
+        "palette.selected": "bold fg:#ffffff bg:#343a43",
+        "palette.item": "fg:#e3e6eb bg:#181b1f",
+        "palette.dim": f"fg:{_UI_DIM} bg:#181b1f",
     })
 
 
 def _rounded_frame(body):
-    """A prompt_toolkit frame with Claude Code's rounded corners (╭─╮│╰─╯).
+    """A Sauron prompt frame with rounded corners (╭─╮│╰─╯).
 
     Built from the same Window/VSplit/HSplit primitives prompt_toolkit's own
     Frame uses — only the six border glyphs differ, because the stock Frame
@@ -1569,7 +1611,7 @@ def _rounded_frame(body):
 
 
 class _BoxedPrompt:
-    """Claude-Code-style input: a full-width bordered box with a '> ' marker and
+    """Sauron's inline input: a full-width bordered box with a '> ' marker and
     a dim footer below it. Enter submits, Alt+Enter / Ctrl-J insert a newline,
     Shift+Tab cycles the permission mode, Ctrl-C/Ctrl-D cancel. Duck-types the
     PromptSession interface used by _read_line (``prompt_async``)."""
@@ -1594,8 +1636,7 @@ class _BoxedPrompt:
             height=D(min=1), scrollbar=False,
             history=self.history, completer=self.completer, complete_while_typing=True,
         )
-        # Claude-Code-style: the box hugs its content (one line, grows as you
-        # type) instead of the multiline TextArea stretching to fill the screen.
+        # Let the box grow with the draft instead of stretching to fill the screen.
         ta.window.dont_extend_height = to_filter(True)
         res = {"text": None, "signal": None}
         kb = KeyBindings()
@@ -1628,15 +1669,14 @@ class _BoxedPrompt:
             event.app.invalidate()
 
         def _footer():
-            # Claude-Code footer: the mode in the brand accent, rest dim grey.
+            # Keep the active mode prominent and secondary state quiet.
             return HTML(
-                f"  <style fg='{_CC_ACCENT}'>{_PERM_LABEL[state.perm]}</style>"
-                f"<style fg='{_CC_DIM}'>  ·  shift+tab  ·  {state.model or 'auto'}"
+                f"  <style fg='{_UI_ACCENT}'>{_PERM_LABEL[state.perm]}</style>"
+                f"<style fg='{_UI_DIM}'>  ·  shift+tab  ·  {state.model or 'auto'}"
                 f"{_footer_extra(state)}</style>"
             )
 
-        # Claude-Code input: rounded thin dim-grey box (not prompt_toolkit's
-        # default bright square frame).
+        # Rounded brand-accented box, matched to the full-screen composer.
         layout = Layout(HSplit([
             _rounded_frame(ta),
             Window(FormattedTextControl(_footer), height=1),
@@ -1671,7 +1711,7 @@ async def _read_line(session, cwd: str) -> str:
     return (await asyncio.to_thread(console.input, "[dim]>[/] ")).strip()
 
 
-# ---- Claude-Code-style full-screen TUI -------------------------------------
+# ---- Sauron full-screen TUI ------------------------------------------------
 # A pinned layout on the alternate screen (so the terminal is hidden on launch
 # and restored on exit): banner fixed at the top, the conversation transcript
 # scrolling in the middle, the rounded input box pinned just above a one-line
@@ -1692,21 +1732,22 @@ def _render_ansi(renderable, width: int) -> str:
 
 
 class _FullScreenUI:
-    """Owns the alternate-screen layout and feeds submitted lines to the REPL.
+    """Owns the alternate-screen layout, pickers, and REPL input queue.
 
     The REPL keeps its linear ``while`` loop: it awaits :meth:`next` for the
     next line while this app renders in the background, and every ``console``
     write lands in the scrolling transcript (see :class:`_CaptureConsole`)."""
 
-    def __init__(self, header_ansi: str, state, footer_cb, content_width: int = 80):
+    def __init__(self, header_cb, state, footer_cb, content_width: int = 80,
+                 _input=None, _output=None):
         from prompt_toolkit.application import Application
-        from prompt_toolkit.filters import to_filter
-        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.filters import Condition, to_filter
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.containers import ConditionalContainer, Float, FloatContainer
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension as D
-        from prompt_toolkit.widgets import TextArea
+        from prompt_toolkit.widgets import Frame, TextArea
 
         self.state = state
         self.content_width = content_width
@@ -1714,11 +1755,15 @@ class _FullScreenUI:
         self._pending = ""              # current partial line (streaming)
         self._live_start = None         # index where a live (streaming) block begins
         self._scroll = 0                # lines scrolled up from the bottom (0 = follow)
+        self._header_cb = header_cb
         self._footer_cb = footer_cb
         self._queue: asyncio.Queue = asyncio.Queue()
-
-        header_lines = header_ansi.rstrip("\n").split("\n")
-        self._header_h = len(header_lines)
+        self._header_h = 2
+        self._picker_open = False
+        self._picker_title = ""
+        self._picker_choices = []
+        self._picker_index = 0
+        self._picker_future = None
 
         self.ta = TextArea(
             multiline=True, prompt="> ", wrap_lines=True,
@@ -1727,10 +1772,51 @@ class _FullScreenUI:
             complete_while_typing=True,
         )
         self.ta.window.dont_extend_height = to_filter(True)
+        self._picker_input = TextArea(
+            multiline=False, prompt="⌕ ", height=1, wrap_lines=False,
+            style="class:palette.input",
+        )
 
         kb = KeyBindings()
+        _picker_filter = Condition(lambda: self._picker_open)
+        _normal_filter = Condition(lambda: not self._picker_open)
 
-        @kb.add("enter")
+        @kb.add("enter", filter=_picker_filter)
+        def _(e):
+            choices = self._visible_picker_choices()
+            choice = choices[self._picker_index] if choices else None
+            future = self._picker_future
+            if future is not None and not future.done():
+                future.set_result(choice)
+
+        @kb.add("escape", filter=_picker_filter)
+        @kb.add("c-c", filter=_picker_filter)
+        @kb.add("c-d", filter=_picker_filter)
+        @kb.add("c-p", filter=_picker_filter)
+        def _(e):
+            future = self._picker_future
+            if future is not None and not future.done():
+                future.set_result(None)
+
+        @kb.add("up", filter=_picker_filter)
+        def _(e):
+            count = len(self._visible_picker_choices())
+            if count:
+                self._picker_index = (self._picker_index - 1) % count
+                e.app.invalidate()
+
+        @kb.add("down", filter=_picker_filter)
+        def _(e):
+            count = len(self._visible_picker_choices())
+            if count:
+                self._picker_index = (self._picker_index + 1) % count
+                e.app.invalidate()
+
+        @kb.add("c-p", filter=_normal_filter)
+        def _(e):
+            asyncio.create_task(self._open_command_palette())
+
+        @kb.add("enter", filter=_normal_filter)
         def _(e):
             txt = self.ta.text
             self.ta.text = ""
@@ -1739,7 +1825,7 @@ class _FullScreenUI:
                 self.state.queued += 1  # F4: queued while a turn is running
             self._queue.put_nowait(("line", txt))
 
-        @kb.add("escape")
+        @kb.add("escape", filter=_normal_filter)
         def _(e):
             # F5: Esc interrupts an in-flight turn; it does nothing when idle
             # (so normal editing/escape sequences aren't hijacked).
@@ -1747,13 +1833,13 @@ class _FullScreenUI:
                 _CANCEL.set()
                 e.app.invalidate()
 
-        @kb.add("pageup")
+        @kb.add("pageup", filter=_normal_filter)
         def _(e):
             self._scroll += max(1, self._vis_height() - 1)
             self._clamp_scroll()
             e.app.invalidate()
 
-        @kb.add("pagedown")
+        @kb.add("pagedown", filter=_normal_filter)
         def _(e):
             self._scroll -= max(1, self._vis_height() - 1)
             self._clamp_scroll()
@@ -1762,9 +1848,7 @@ class _FullScreenUI:
         # Mouse wheel (via alternate-scroll → arrow keys) scrolls the transcript
         # when you're not editing, so native copy keeps working. With text in
         # the box, Up/Down fall through to normal cursor/history navigation.
-        from prompt_toolkit.filters import Condition as _Cond
-
-        _idle = _Cond(lambda: not self.ta.text.strip())
+        _idle = Condition(lambda: not self._picker_open and not self.ta.text.strip())
 
         @kb.add("up", filter=_idle)
         def _(e):
@@ -1778,22 +1862,22 @@ class _FullScreenUI:
             self._clamp_scroll()
             e.app.invalidate()
 
-        @kb.add("escape", "enter")
-        @kb.add("c-j")
+        @kb.add("escape", "enter", filter=_normal_filter)
+        @kb.add("c-j", filter=_normal_filter)
         def _(e):
             self.ta.buffer.insert_text("\n")
 
-        @kb.add("c-c")
+        @kb.add("c-c", filter=_normal_filter)
         def _(e):
             self._queue.put_nowait(("sig", "int"))
 
-        @kb.add("c-d")
+        @kb.add("c-d", filter=_normal_filter)
         def _(e):
             if not self.ta.text:
                 self._queue.put_nowait(("sig", "eof"))
 
-        @kb.add("s-tab")
-        @kb.add("escape", "[", "Z")
+        @kb.add("s-tab", filter=_normal_filter)
+        @kb.add("escape", "[", "Z", filter=_normal_filter)
         def _(e):
             self.state.cycle_perm()
             e.app.invalidate()
@@ -1814,17 +1898,35 @@ class _FullScreenUI:
             _ScrollFTC(self._transcript_text),
             wrap_lines=False, always_hide_cursor=True,
         )
-        header_win = Window(FormattedTextControl(lambda: ANSI(header_ansi)),
-                            height=self._header_h)
+        header_win = Window(FormattedTextControl(self._header_cb), height=self._header_h)
         footer_win = Window(FormattedTextControl(lambda: self._footer_cb()), height=1)
 
         body = HSplit([header_win, self._twin, _rounded_frame(self.ta), footer_win])
-        # Uniform left gutter (and matching right margin) so nothing sits flush
-        # against the pane edge — matches Claude Code's indented content.
-        layout = Layout(
-            VSplit([Window(width=_FS_GUTTER), body, Window(width=_FS_GUTTER)]),
-            focused_element=self.ta,
+        picker = Frame(
+            HSplit([
+                Window(FormattedTextControl(self._picker_heading), height=1),
+                self._picker_input,
+                Window(
+                    FormattedTextControl(self._picker_items),
+                    height=7,
+                    style="class:palette.list",
+                    wrap_lines=False,
+                ),
+                Window(FormattedTextControl(self._picker_footer), height=1),
+            ]),
+            style="class:palette.frame",
         )
+        root = FloatContainer(
+            content=VSplit([Window(width=_FS_GUTTER), body, Window(width=_FS_GUTTER)]),
+            floats=[
+                Float(
+                    content=ConditionalContainer(picker, filter=_picker_filter),
+                    top=2, left=4, right=4, height=12,
+                    z_index=100,
+                ),
+            ],
+        )
+        layout = Layout(root, focused_element=self.ta)
         # Mouse capture OFF by default so native terminal select/copy works;
         # Mouse capture OFF by default so native drag-select + COPY work. The
         # wheel still scrolls via terminal "alternate scroll" (DECSET 1007,
@@ -1836,7 +1938,89 @@ class _FullScreenUI:
         self.app = Application(
             layout=layout, key_bindings=kb, full_screen=True,
             style=_box_style(), mouse_support=_fs_mouse,
+            input=_input, output=_output,
         )
+
+    def _visible_picker_choices(self):
+        return _filter_picker_choices(self._picker_choices, self._picker_input.text)
+
+    def _picker_heading(self):
+        from prompt_toolkit.formatted_text import FormattedText
+
+        return FormattedText([
+            ("class:palette.title", f" {self._picker_title}"),
+            ("class:palette.hint", "   ·   type to filter · ↑/↓ select · Enter open"),
+        ])
+
+    def _picker_items(self):
+        from prompt_toolkit.formatted_text import FormattedText
+
+        choices = self._visible_picker_choices()
+        if not choices:
+            return FormattedText([("class:palette.dim", "  No matching results\n")])
+        self._picker_index = min(self._picker_index, len(choices) - 1)
+        start = max(0, min(self._picker_index - 3, len(choices) - 7))
+        line_width = max(20, self.content_width - 8)
+        parts = []
+        for index in range(start, min(start + 7, len(choices))):
+            label, _value, description, category = choices[index]
+            selected = index == self._picker_index
+            style = "class:palette.selected" if selected else "class:palette.item"
+            marker = "›" if selected else " "
+            detail_style = "class:palette.selected" if selected else "class:palette.dim"
+            label_width = max(8, line_width - 20)
+            shown_label = label if len(label) <= label_width else label[:label_width - 1] + "…"
+            prefix = f" {marker} {shown_label}"
+            detail = f"  {category} · {description}"
+            detail_width = max(0, line_width - len(prefix))
+            if len(detail) > detail_width:
+                detail = detail[:max(0, detail_width - 1)] + "…"
+            parts.append((style, prefix))
+            parts.append((detail_style, detail + "\n"))
+        return FormattedText(parts)
+
+    def _picker_footer(self):
+        from prompt_toolkit.formatted_text import FormattedText
+
+        return FormattedText([("class:palette.hint", "  Ctrl+P close  ·  Esc cancel")])
+
+    async def choose(self, title: str, choices):
+        """Open a searchable in-app picker without starting a competing TUI."""
+        if self._picker_open:
+            return None
+        future = asyncio.get_running_loop().create_future()
+        self._picker_title = title
+        self._picker_choices = list(choices)
+        self._picker_index = 0
+        self._picker_input.text = ""
+        self._picker_future = future
+        self._picker_open = True
+        self.app.layout.focus(self._picker_input)
+        self.app.invalidate()
+        try:
+            return await future
+        finally:
+            self._picker_open = False
+            self._picker_future = None
+            self._picker_choices = []
+            self._picker_input.text = ""
+            self.app.layout.focus(self.ta)
+            if self.app.is_running:
+                self.app.invalidate()
+
+    async def _open_command_palette(self):
+        choice = await self.choose("Command palette", _PALETTE_CHOICES)
+        if choice is None:
+            return
+        command = choice[1]
+        if command.endswith(" "):
+            draft = self.ta.text
+            self.ta.text = command + draft
+            self.ta.buffer.cursor_position = len(self.ta.text)
+            return
+        if getattr(self.state, "busy", False):
+            self.state.queued += 1
+        self._queue.put_nowait(("line", command))
 
     # -- transcript sink ---------------------------------------------------
     def _vis_height(self) -> int:
@@ -1956,13 +2140,12 @@ def _models_table() -> str:
 
 
 def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
-    """Cohesive welcome / help panel: brand, live session context, then the
-    command groups and keys. Extra context (session/cwd/model/storage/policy)
-    is optional so /help can call it with just the routing pair."""
+    """Compact command reference with live session and routing context."""
     model = ctx.get("model") or "auto (routed)"
     session_id = ctx.get("session_id", "")
     cwd = ctx.get("cwd", "")
     storage = ctx.get("storage", os.getenv("PAL_STORAGE", "memory"))
+    fullscreen = ctx.get("fullscreen", False)
     plan_only = ctx.get("plan_only", _claude_plan_only())
     orch_present = ctx.get("orch_present")
     orch_cli = ctx.get("orch_cli", _orchestrator_cli())
@@ -1977,10 +2160,14 @@ def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
     def _row(label, *parts):
         return Text.assemble((f"  {label:<8}", "dim"), *parts)
 
+    key_hint = (
+        "Ctrl+P palette · ↑/↓ navigate · Enter select · PgUp/PgDn scroll"
+        if fullscreen else "Ctrl-P/Ctrl-N history"
+    )
     rows = [
-        Text.assemble(("◆ ", "bold cyan"), ("sauron", "bold cyan"),
+        Text.assemble(("◉ ", f"bold {_ACCENT}"), ("sauron", f"bold {_ACCENT}"),
                       ("   one agent to route them all", "dim")),
-        Rule(style="cyan"),
+        Rule(style=_ACCENT),
         _row("routing", ("cheap ", "dim"), (str(cheap or "—"), "green"),
              ("   smart ", "dim"), (str(smart or "—"), "magenta")),
         _row("model", (str(model), "")),
@@ -1990,28 +2177,16 @@ def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
                          (f"store:{storage}", "dim"), ("  ·  ", "dim"), (cwd, "dim")))
     rows += [
         _row("agent", (policy, "dim")),
-        Rule(style="cyan"),
+        Rule(style=_ACCENT),
         _row("chat", ("message = run with tools  ·  ", "dim"),
-             ("/ask /cheap /smart", "cyan"), (" = plain chat", "dim")),
-        _row("agent", ("/agent[:edit|:plan|:review]", "cyan"),
-             ("  ·  ", "dim"), ("/delegate <model>", "cyan"), ("  ·  ", "dim"), ("/debate", "cyan")),
-        _row("memory", ("/context /history /compact /clear /resume /status", "cyan")),
-        _row("models", ("/model /models", "cyan"), ("   ", "dim"), ("/help /exit", "cyan")),
-        Text("  keys: Enter send · Alt+Enter newline · ↑/↓ history · Ctrl-P/Ctrl-N history", style="dim"),
+             ("/ask /cheap /smart", _ACCENT), (" = plain chat", "dim")),
+        _row("agent", ("/agent[:edit|:plan|:review]", _ACCENT),
+             ("  ·  ", "dim"), ("/delegate <model>", _ACCENT), ("  ·  ", "dim"), ("/debate", _ACCENT)),
+        _row("memory", ("/context /history /compact /clear /resume /sessions /status", _ACCENT)),
+        _row("models", ("/model /models", _ACCENT), ("   ", "dim"), ("/help /exit", _ACCENT)),
+        Text(f"  keys: Enter send · Alt+Enter newline · {key_hint}", style="dim"),
     ]
-    return Panel(Group(*rows), border_style="cyan", padding=(0, 1))
-
-
-# Eye-of-Sauron logo, top→bottom flame gradient from the brand palette (sauron.svg).
-_LOGO = [
-    "   ▄█████▄   ",
-    " ▄██▀ █ ▀██▄ ",
-    "███   █   ███",
-    " ▀██▄ █ ▄██▀ ",
-    "   ▀█████▀   ",
-]
-_LOGO_STYLES = [f"bold {_ACCENT}"] * 5  # single muted accent, no rainbow
-_BRAND = "#ff8a1c"
+    return Panel(Group(*rows), border_style=_ACCENT, padding=(0, 1))
 
 
 def _version() -> str:
@@ -2030,11 +2205,7 @@ def _version() -> str:
 
 
 def _banner(cheap: str | None, smart: str | None, **ctx):
-    """Compact, borderless startup banner: the Sauron eye logo on the left with
-    the engine identity stacked to its right, then a one-line feature summary
-    and a command hint — styled after a modern CLI splash."""
-    from rich.table import Table
-
+    """Small startup identity that leaves most terminal space for the chat."""
     model = ctx.get("model") or "auto (routed)"
     cwd = ctx.get("cwd", "")
     home = os.path.expanduser("~")
@@ -2042,24 +2213,17 @@ def _banner(cheap: str | None, smart: str | None, **ctx):
     plan_only = ctx.get("plan_only", _claude_plan_only())
     exec_mode = "engine-only" if plan_only else "claude+engine"
     ver = _version()
-
-    logo = Text()
-    for i, row in enumerate(_LOGO):
-        logo.append(row + ("\n" if i < len(_LOGO) - 1 else ""), style=_LOGO_STYLES[i])
-
-    # Minimal, monochrome identity: accent only on the name; everything else dim.
-    ident = Group(
-        Text.assemble(("sauron", f"bold {_ACCENT}"), (f"  v{ver}" if ver else "", "dim")),
-        Text(f"{model}  ·  {exec_mode}  ·  self-contained", style="dim"),
-        Text(cwd_disp, style="dim"),
+    command_hint = (
+        "Ctrl+P commands  ·  Shift+Tab mode  ·  /help"
+        if ctx.get("fullscreen") else "Type / for commands  ·  Shift+Tab mode  ·  /help"
     )
-    grid = Table.grid(padding=(0, 3))
-    grid.add_column()
-    grid.add_column(vertical="middle")
-    grid.add_row(logo, ident)
 
-    hint = Text("/help  ·  shift+tab for mode  ·  /exit", style="dim")
-    return Group(grid, Text(""), hint)
+    return Group(
+        Text.assemble(("◉ ", f"bold {_ACCENT}"), ("sauron", f"bold {_ACCENT}"),
+                      (f"  v{ver}" if ver else "", "dim")),
+        Text(f"{cwd_disp}  ·  {model}  ·  {exec_mode}", style="dim"),
+        Text(command_hint, style="dim"),
+    )
 
 
 def _available_models() -> list[str]:
@@ -2122,12 +2286,81 @@ def _available_models() -> list[str]:
     return out
 
 
-async def _pick_model_menu(session, cwd, current):
-    """Show a numbered menu of available models; return the chosen id (or None for auto)."""
+def _session_picker_choices(rows):
+    """Build searchable picker rows from persisted session summaries."""
+    import datetime
+
+    choices = []
+    for row in rows:
+        stamp = ""
+        try:
+            stamp = datetime.datetime.fromtimestamp(
+                float(row.get("updated_at") or 0)
+            ).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, TypeError, ValueError):
+            pass
+        session_id = str(row.get("id") or "")
+        turns = row.get("turns") or 0
+        cwd = str(row.get("cwd") or "")
+        label = f"{session_id} · {turns} turn(s)"
+        description = " · ".join(part for part in (stamp, cwd) if part)
+        choices.append((label, session_id, description or "Saved conversation", "Session"))
+    return choices
+
+
+async def _pick_session_menu(session, cwd, rows, ui=None):
+    if not rows:
+        _note("no saved sessions", "sys")
+        return None
+    if ui is not None:
+        selected = await ui.choose("Switch session", _session_picker_choices(rows))
+        target = selected[1] if selected else None
+    else:
+        console.print("[bold]Switch session[/] [dim](number or session id)[/]")
+        for index, choice in enumerate(_session_picker_choices(rows), 1):
+            console.print(f"  [cyan]{index:>2}[/]. {choice[0]}  [dim]{choice[2]}[/]")
+        try:
+            answer = (await _read_line(session, cwd) or "").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(rows):
+            target = str(rows[int(answer) - 1].get("id") or "")
+        else:
+            target = answer if any(str(row.get("id")) == answer for row in rows) else None
+    return next((row for row in rows if str(row.get("id")) == target), None)
+
+
+async def _pick_model_menu(session, cwd, current, ui=None):
+    """Pick an available model; return its id or None for automatic routing."""
     models = _available_models()
     if not models:
         console.print("[red]no models available — check `pal diag`[/]")
         return current
+    if ui is not None:
+        choices = [
+            (
+                "Automatic routing",
+                "__auto__",
+                "Let Sauron choose the cheap or smart route",
+                "Routing" + (" · current" if current is None else ""),
+            ),
+        ]
+        choices.extend(
+            (
+                model,
+                model,
+                "Currently selected" if model == current else "Available model",
+                "Model",
+            )
+            for model in models
+        )
+        selected = await ui.choose("Choose model", choices)
+        if selected is None:
+            return current
+        chosen = None if selected[1] == "__auto__" else selected[1]
+        console.print(f"[dim]model: {chosen or 'auto (routed)'}[/]")
+        return chosen
+
     console.print("[bold cyan]Pick a model[/] [dim](type the number, Enter to keep)[/]")
     console.print("   [cyan]0[/]. auto (cheap/smart routing)")
     for i, m in enumerate(models, 1):
@@ -2489,7 +2722,7 @@ async def _run(handle):
     # One durable id per launch so the self-contained context (history) persists
     # to ~/.pal/sessions.db and /resume can bring it back after a restart.
     session_id = _new_session_id()
-    state = _ReplState(selected_model, cwd)
+    state = _ReplState(selected_model, cwd, session_id)
 
     def _persist() -> None:
         session_store.save(session_id, history, cwd, selected_model or "")
@@ -2500,6 +2733,7 @@ async def _run(handle):
             "storage": os.getenv("PAL_STORAGE", "memory"),
             "plan_only": _claude_plan_only(),
             "orch_present": _orchestrator_available(), "orch_cli": _orchestrator_cli(),
+            "fullscreen": _fullscreen,
         }
 
     def _show_welcome() -> None:
@@ -2521,12 +2755,36 @@ async def _run(handle):
         not in ("0", "false", "off", "no")
     )
 
+    def _fs_header():
+        home = os.path.expanduser("~")
+        cwd_disp = cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd
+        if len(cwd_disp) > 48:
+            cwd_disp = "…" + cwd_disp[-47:]
+        model_disp = selected_model or "auto-routed"
+        if len(model_disp) > 30:
+            model_disp = "…" + model_disp[-29:]
+        session_short = session_id[-8:] if session_id else "new"
+        return [
+            (f"bold fg:{_ACCENT}", "  ◉ sauron"),
+            (f"fg:{_UI_DIM}", f"   {cwd_disp}"),
+            ("", "\n"),
+            (f"fg:{_UI_DIM}", "    model "),
+            (f"fg:{_ACCENT}", model_disp),
+            (f"fg:{_UI_DIM}", f"   ·   session {session_short}"),
+        ]
+
     def _fs_footer():
-        return HTML(
-            f"<style fg='{_CC_ACCENT}'>{_PERM_LABEL[state.perm]}</style>"
-            f"<style fg='{_CC_DIM}'>  ·  shift+tab  ·  {state.model or 'auto'}"
-            f"{_footer_extra(state)}  ·  PgUp/PgDn scroll</style>"
-        )
+        parts = [
+            (f"bold fg:{_ACCENT}", f"  {_PERM_LABEL[state.perm]}"),
+            (f"fg:{_UI_DIM}", "  ·  Shift+Tab"),
+            (f"fg:{_UI_DIM}", f"  ·  ctx {state.ctx_pct}%"),
+        ]
+        if state.busy:
+            parts.append((f"fg:{_ACCENT}", "  ·  working"))
+        if state.queued:
+            parts.append((f"fg:{_UI_DIM}", f"  ·  q:{state.queued}"))
+        parts.append((f"fg:{_UI_DIM}", "  ·  Ctrl+P palette"))
+        return parts
 
     ui = None
     app_task = None
@@ -2565,8 +2823,7 @@ async def _run(handle):
 
     if _fullscreen:
         try:
-            header_ansi = _render_ansi(_banner(r0["cheap"], r0["smart"], **_wctx()), content_w)
-            ui = _FullScreenUI(header_ansi, state, _fs_footer, content_width=content_w)
+            ui = _FullScreenUI(_fs_header, state, _fs_footer, content_width=content_w)
             globals()["_FULLSCREEN_ACTIVE"] = True
             globals()["_FS_UI"] = ui
             console = _CaptureConsole(ui, width=content_w)
@@ -2595,7 +2852,7 @@ async def _run(handle):
 
     prior = session_store.latest()
     if prior and prior.get("turns"):
-        _note(f"{prior['turns']} turns from your last session — /resume to continue", "sys")
+        _note(f"{prior['turns']} turns from your last session — /sessions to switch back", "sys")
 
     while True:
         # Between turns: not busy, refresh the context-usage gauge (F2/F4/F5).
@@ -2638,7 +2895,36 @@ async def _run(handle):
             history.clear()
             # start a NEW durable session so the prior one stays on disk
             session_id = _new_session_id()
+            state.session_id = session_id
             console.print(f"[dim]context cleared — new session {session_id}[/]")
+            continue
+        if low in ("/sessions", "/session"):
+            state.busy = False
+            rows = session_store.recent(50)
+            selected = await _pick_session_menu(session, cwd, rows, ui=ui)
+            if selected is None:
+                continue
+            target = str(selected.get("id") or "")
+            restored = session_store.load(target)
+            if restored is None:
+                _note(f"saved session '{target}' is unavailable", "err")
+                continue
+            history[:] = restored
+            session_id = target
+            saved_cwd = str(selected.get("cwd") or "")
+            if saved_cwd and os.path.isdir(saved_cwd):
+                cwd = saved_cwd
+            elif saved_cwd:
+                _note("saved working directory is unavailable; keeping the current directory", "sys")
+            saved_model = str(selected.get("model") or "") or None
+            if saved_model and not _is_available(saved_model):
+                _note(f"saved model '{saved_model}' is unavailable; using automatic routing", "sys")
+                saved_model = None
+            selected_model = saved_model
+            state.session_id = session_id
+            state.cwd = cwd
+            state.model = selected_model
+            _note(f"switched to {target} — {len(history)} turn(s) restored", "ok")
             continue
         if low.startswith("/resume"):
             arg = line[len("/resume"):].strip()
@@ -2666,6 +2952,7 @@ async def _run(handle):
                 continue
             history[:] = restored
             session_id = target  # keep writing back to the resumed session
+            state.session_id = session_id
             _note(f"resumed session {target} — {len(history)} turn(s) restored", "ok")
             continue
         if low in ("/context", "/ctx"):
@@ -2708,7 +2995,8 @@ async def _run(handle):
             console.print(_status_panel(selected_model, cwd))
             continue
         if low in ("/model", "/pick"):
-            selected_model = await _pick_model_menu(session, cwd, selected_model)
+            state.busy = False
+            selected_model = await _pick_model_menu(session, cwd, selected_model, ui=ui)
             state.model = selected_model
             continue
         if low == "/models":
