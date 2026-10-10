@@ -1,25 +1,39 @@
 {
   "name": "sauron",
-  "version": "1.0.0",
-  "description": "Interactive installer + pentesting-skills registry for the sauron offensive-security AI orchestrator framework.",
+  "version": "2.0.0",
+  "description": "Multi-provider AI orchestrator & offensive-security terminal framework",
+  "type": "module",
   "bin": {
     "sauron": "bin/cli.js"
   },
   "scripts": {
-    "test": "bash -n setup.sh && bash bin/setup-lib.sh && echo lib-syntax-ok && bash bin/test-setup-lib.sh && bash bin/sauron-selftest"
+    "start": "bun run src/cli.ts",
+    "test": "bun test tests/",
+    "test:all": "bun test tests/ && bash -n setup.sh && bash bin/setup-lib.sh && bash bin/test-setup-lib.sh && bash bin/sauron-selftest",
+    "typecheck": "bun x tsc --noEmit"
   },
   "engines": {
-    "node": ">=14"
+    "node": ">=18",
+    "bun": ">=1.0.0"
   },
+  "packageManager": "bun@1.4.3",
   "license": "MIT",
-  "keywords": ["ai", "claude", "cursor", "bug-bounty", "pentest", "skills", "installer"],
+  "keywords": [
+    "ai",
+    "claude",
+    "tui",
+    "opencode",
+    "pentest",
+    "orchestrator",
+    "multi-model"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/crowx01/sauron"
   },
   "files": [
     "bin/",
-    "core/",
+    "src/",
     "skills/",
     "docs/",
     "setup.sh",
@@ -27,5 +41,9 @@
     "README.md",
     "LICENSE",
     "THIRD_PARTY_LICENSES.md"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "bun-types": "latest"
+  }
 }

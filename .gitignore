@@ -21,3 +21,8 @@ core/.env.*
 # selftest / py_compile byproducts
 __pycache__/
 *.pyc
+
+# Node / Bun
+node_modules/
+bun.lockb
+
