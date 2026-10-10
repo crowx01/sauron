@@ -3,7 +3,7 @@
  * SessionTabBar, SidebarPane, MessageCardRenderer, BlockTool, PatchDiff & PromptComposer
  */
 
-import { themeStore, fg, fgBg, bold, dim, italic, underline, visibleLen, padToWidth, ThemeTokens } from './themes';
+import { themeStore, fg, fgBg, bold, dim, italic, underline, visibleLen, padToWidth, wrapText, ThemeTokens } from './themes';
 import { Message, StreamChunk } from '../types';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
@@ -72,25 +72,29 @@ export class MessageCardRenderer {
     const lines: string[] = [];
     const isUser = msg.role === 'user';
     const isSystem = msg.role === 'system';
+    const maxContentWidth = Math.max(10, width - 4);
 
     if (isUser) {
       const headerStr = ` USER  ${new Date(msg.timestamp).toLocaleTimeString()}`;
       lines.push(fgBg(t.text.base, t.background.selection, bold(padToWidth(` ${headerStr}`, width - 2))));
       
-      // Parse @extmarks
       let text = msg.content;
       text = text.replace(/@([\w.-]+)/g, (_, name) => fg(t.text.extmarkFile, `@${name}`));
       text = text.replace(/\/([\w.-]+)/g, (_, cmd) => fg(t.text.extmarkAgent, `/${cmd}`));
 
-      for (const line of text.split('\n')) {
-        lines.push(`  ${line}`);
+      const wrapped = wrapText(text, maxContentWidth);
+      for (const line of wrapped) {
+        lines.push(`  ${padToWidth(line, maxContentWidth)}`);
       }
       lines.push('');
       return lines;
     }
 
     if (isSystem) {
-      lines.push(fg(t.text.muted, `  [SYSTEM] ${msg.content}`));
+      const wrapped = wrapText(`[SYSTEM] ${msg.content}`, maxContentWidth);
+      for (const line of wrapped) {
+        lines.push(fg(t.text.muted, `  ${padToWidth(line, maxContentWidth)}`));
+      }
       lines.push('');
       return lines;
     }
@@ -102,20 +106,28 @@ export class MessageCardRenderer {
     const rawLines = msg.content.split('\n');
     let inCode = false;
 
-    for (const l of rawLines) {
-      if (l.startsWith('```')) {
+    for (const rawL of rawLines) {
+      if (rawL.startsWith('```')) {
         inCode = !inCode;
-        lines.push(fg(t.syntax.comment, `  ${l}`));
+        lines.push(fg(t.syntax.comment, `  ${padToWidth(rawL.slice(0, maxContentWidth), maxContentWidth)}`));
         continue;
       }
 
       if (inCode) {
-        lines.push(fg(t.syntax.string, `    ${l}`));
-      } else if (l.startsWith('> ')) {
-        // Reasoning part
-        lines.push(fg(t.text.muted, italic(`  ${l}`)));
+        const wrappedCode = wrapText(rawL, maxContentWidth - 4);
+        for (const cl of wrappedCode) {
+          lines.push(fg(t.syntax.string, `    ${padToWidth(cl, maxContentWidth - 4)}`));
+        }
+      } else if (rawL.startsWith('> ')) {
+        const wrappedReasoning = wrapText(rawL, maxContentWidth - 2);
+        for (const rl of wrappedReasoning) {
+          lines.push(fg(t.text.muted, italic(`  ${padToWidth(rl, maxContentWidth - 2)}`)));
+        }
       } else {
-        lines.push(`  ${l}`);
+        const wrappedNormal = wrapText(rawL, maxContentWidth - 2);
+        for (const nl of wrappedNormal) {
+          lines.push(`  ${padToWidth(nl, maxContentWidth - 2)}`);
+        }
       }
     }
 

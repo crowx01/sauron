@@ -98,7 +98,53 @@ export function padToWidth(str: string, targetWidth: number): string {
   return diff > 0 ? str + ' '.repeat(diff) : str;
 }
 
+export function wrapText(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 4) maxWidth = 4;
+  const result: string[] = [];
+  const rawLines = text.split('\n');
+
+  for (const line of rawLines) {
+    if (visibleLen(line) <= maxWidth) {
+      result.push(line);
+      continue;
+    }
+
+    let currentLine = '';
+    const words = line.split(' ');
+
+    for (const word of words) {
+      if (visibleLen(word) > maxWidth) {
+        if (currentLine) {
+          result.push(currentLine);
+          currentLine = '';
+        }
+        let chunk = word;
+        while (visibleLen(chunk) > maxWidth) {
+          result.push(chunk.slice(0, maxWidth));
+          chunk = chunk.slice(maxWidth);
+        }
+        currentLine = chunk;
+        continue;
+      }
+
+      const candidate = currentLine ? `${currentLine} ${word}` : word;
+      if (visibleLen(candidate) <= maxWidth) {
+        currentLine = candidate;
+      } else {
+        result.push(currentLine);
+        currentLine = word;
+      }
+    }
+    if (currentLine) {
+      result.push(currentLine);
+    }
+  }
+
+  return result;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
+
 
   const clean = hex.replace('#', '');
   if (clean.length === 3) {
