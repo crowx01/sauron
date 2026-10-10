@@ -3,7 +3,7 @@
  * Full OpenCode Layout Engine: Split Panes, Modals, Themes & Synchronized Render Loop
  */
 
-import { themeStore } from './themes';
+import { themeStore, visibleLen } from './themes';
 import { keymapRegistry } from './keymaps';
 import { modalManager } from './modals';
 import { SessionTabBar, SidebarPane, MessageCardRenderer, PromptComposer } from './views';
@@ -87,6 +87,12 @@ export class OpenCodeEngine {
 
   private handleInput(str: string) {
     const key = this.parseKey(str);
+
+    // Ctrl+C / Ctrl+D Exit
+    if (key.ctrl && (key.name === 'c' || key.name === 'd')) {
+      this.stop();
+      return;
+    }
 
     // 1. Give active modal priority
     if (modalManager.getActiveModal() !== 'none') {
@@ -267,12 +273,13 @@ export class OpenCodeEngine {
     // Overlay: Active Modal (if open)
     const modalLines = modalManager.render(width, height);
     if (modalLines.length > 0) {
-      frame += '\x1b[H'; // Reset to top for modal overlay
       const startRow = Math.floor((height - modalLines.length) / 2);
-      for (let r = 0; r < startRow; r++) frame += '\n';
-      for (const ml of modalLines) {
-        const indent = ' '.repeat(Math.max(0, Math.floor((width - 88) / 2)));
-        frame += indent + ml + '\n';
+      const modalW = visibleLen(modalLines[0]);
+      const startCol = Math.floor((width - modalW) / 2);
+      for (let r = 0; r < modalLines.length; r++) {
+        const row = startRow + r + 1;
+        const col = startCol + 1;
+        frame += `\x1b[${row};${col}H${modalLines[r]}`;
       }
     }
 
@@ -282,10 +289,14 @@ export class OpenCodeEngine {
   }
 
   private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean } {
-    if (str === '\x1b[A') return { name: 'up' };
-    if (str === '\x1b[B') return { name: 'down' };
-    if (str === '\x1b[C') return { name: 'right' };
-    if (str === '\x1b[D') return { name: 'left' };
+    if (str === '\x03') return { name: 'c', ctrl: true };
+    if (str === '\x04') return { name: 'd', ctrl: true };
+
+    if (str === '\x1b[A' || str === '\x1bOA') return { name: 'up' };
+    if (str === '\x1b[B' || str === '\x1bOB') return { name: 'down' };
+    if (str === '\x1b[C' || str === '\x1bOC') return { name: 'right' };
+    if (str === '\x1b[D' || str === '\x1bOD') return { name: 'left' };
+    
     if (str === '\r' || str === '\n') return { name: 'return' };
     if (str === '\x7f' || str === '\x08') return { name: 'backspace' };
     if (str === '\x1b') return { name: 'escape' };

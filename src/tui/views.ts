@@ -3,7 +3,7 @@
  * SessionTabBar, SidebarPane, MessageCardRenderer, BlockTool, PatchDiff & PromptComposer
  */
 
-import { themeStore, fg, fgBg, bold, dim, italic, underline, ThemeTokens } from './themes';
+import { themeStore, fg, fgBg, bold, dim, italic, underline, visibleLen, padToWidth, ThemeTokens } from './themes';
 import { Message, StreamChunk } from '../types';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
@@ -20,8 +20,9 @@ export class SessionTabBar {
     const hintFormatted = fg(t.text.muted, helpHint);
 
     const leftPart = `${activeFormatted}│${inactiveFormatted}`;
-    const leftRawLen = tab1.length + 1 + tab2.length;
-    const padding = Math.max(0, width - leftRawLen - helpHint.length - 2);
+    const leftLen = visibleLen(leftPart);
+    const hintLen = visibleLen(hintFormatted);
+    const padding = Math.max(0, width - leftLen - hintLen);
 
     return `${leftPart}${' '.repeat(padding)}${hintFormatted}`;
   }
@@ -34,33 +35,34 @@ export class SidebarPane {
     const activeModel = chatRouter.getDefaultModel();
     const playbooks = playbookStore.listPlaybooks();
 
-    lines.push(fg(t.border.base, `┌${'─'.repeat(width - 2)}┐`));
-    lines.push(`│ ${bold(fg(t.text.accent, 'SAURON SIDEBAR'))}${' '.repeat(Math.max(0, width - 16))}│`);
-    lines.push(`├${'─'.repeat(width - 2)}┤`);
+    const border = '─'.repeat(width - 2);
+    lines.push(fg(t.border.base, `┌${border}┐`));
+    lines.push(`│ ${padToWidth(bold(fg(t.text.accent, 'SAURON SIDEBAR')), width - 4)} │`);
+    lines.push(fg(t.border.base, `├${border}┤`));
 
     // Model & Catalog Status
-    lines.push(`│ ${bold(fg(t.text.base, 'Model:'))} ${fg(t.text.accent, activeModel.slice(0, width - 12))}${' '.repeat(Math.max(0, width - activeModel.length - 11))}│`);
-    lines.push(`│ ${bold(fg(t.text.base, 'Session:'))} ${fg(t.text.muted, activeSession.title.slice(0, width - 14))}${' '.repeat(Math.max(0, width - activeSession.title.length - 13))}│`);
-    lines.push(`│ ${bold(fg(t.text.base, 'Messages:'))} ${fg(t.text.info, String(activeSession.messages.length))}${' '.repeat(Math.max(0, width - String(activeSession.messages.length).length - 14))}│`);
+    lines.push(`│ ${padToWidth(`${bold(fg(t.text.base, 'Model:'))} ${fg(t.text.accent, activeModel.slice(0, width - 12))}`, width - 4)} │`);
+    lines.push(`│ ${padToWidth(`${bold(fg(t.text.base, 'Session:'))} ${fg(t.text.muted, activeSession.title.slice(0, width - 14))}`, width - 4)} │`);
+    lines.push(`│ ${padToWidth(`${bold(fg(t.text.base, 'Messages:'))} ${fg(t.text.info, String(activeSession.messages.length))}`, width - 4)} │`);
 
-    lines.push(`├${'─'.repeat(width - 2)}┤`);
-    lines.push(`│ ${bold(fg(t.text.action, 'TACTICAL PLAYBOOKS'))}${' '.repeat(Math.max(0, width - 21))}│`);
+    lines.push(fg(t.border.base, `├${border}┤`));
+    lines.push(`│ ${padToWidth(bold(fg(t.text.action, 'TACTICAL PLAYBOOKS')), width - 4)} │`);
 
     for (let i = 0; i < Math.min(3, playbooks.length); i++) {
       const pb = playbooks[i];
-      const pbStr = `• ${pb.name}`.slice(0, width - 4);
-      lines.push(`│ ${fg(t.text.muted, pbStr.padEnd(width - 4))} │`);
+      const pbStr = `• ${pb.name}`.slice(0, width - 6);
+      lines.push(`│ ${padToWidth(fg(t.text.muted, pbStr), width - 4)} │`);
     }
 
-    lines.push(`├${'─'.repeat(width - 2)}┤`);
-    lines.push(`│ ${bold(fg(t.text.success, 'MCP SERVERS: 2 ACTIVE'))}${' '.repeat(Math.max(0, width - 24))}│`);
-    lines.push(`│ ${fg(t.text.muted, '• Kali SecSuite Engine')}${' '.repeat(Math.max(0, width - 25))}│`);
-    lines.push(`│ ${fg(t.text.muted, '• Local Filesystem MCP')}${' '.repeat(Math.max(0, width - 25))}│`);
+    lines.push(fg(t.border.base, `├${border}┤`));
+    lines.push(`│ ${padToWidth(bold(fg(t.text.success, 'MCP SERVERS: 2 ACTIVE')), width - 4)} │`);
+    lines.push(`│ ${padToWidth(fg(t.text.muted, '• Kali SecSuite Engine'), width - 4)} │`);
+    lines.push(`│ ${padToWidth(fg(t.text.muted, '• Local Filesystem MCP'), width - 4)} │`);
 
     while (lines.length < height - 1) {
-      lines.push(`│${' '.repeat(width - 2)}│`);
+      lines.push(`│ ${' '.repeat(width - 4)} │`);
     }
-    lines.push(fg(t.border.base, `└${'─'.repeat(width - 2)}┘`));
+    lines.push(fg(t.border.base, `└${border}┘`));
     return lines;
   }
 }
@@ -73,7 +75,7 @@ export class MessageCardRenderer {
 
     if (isUser) {
       const headerStr = ` USER  ${new Date(msg.timestamp).toLocaleTimeString()}`;
-      lines.push(fgBg(t.text.base, t.background.selection, bold(` ${headerStr.padEnd(width - 2)} `)));
+      lines.push(fgBg(t.text.base, t.background.selection, bold(padToWidth(` ${headerStr}`, width - 2))));
       
       // Parse @extmarks
       let text = msg.content;
@@ -131,18 +133,17 @@ export class MessageCardRenderer {
     if (status === 'failed') statusBadge = fgBg('#ffffff', t.text.error, ' FAILED ');
 
     lines.push(fg(t.border.base, `┌${border}┐`));
-    const title = ` TOOL ${name.toUpperCase()} ${statusBadge}`;
-    lines.push(`│ ${title}${' '.repeat(Math.max(0, boxW - name.length - 20))}│`);
+    const title = `TOOL ${name.toUpperCase()} ${statusBadge}`;
+    lines.push(`│ ${padToWidth(title, boxW - 4)} │`);
     lines.push(fg(t.border.base, `├${border}┤`));
 
     const argStr = JSON.stringify(args);
-    lines.push(`│ ${fg(t.text.muted, `Args: ${argStr.slice(0, boxW - 10)}`)}${' '.repeat(Math.max(0, boxW - argStr.length - 9))}│`);
+    lines.push(`│ ${padToWidth(fg(t.text.muted, `Args: ${argStr.slice(0, boxW - 10)}`), boxW - 4)} │`);
     
     if (output) {
       lines.push(fg(t.border.base, `├${border}┤`));
       for (const l of output.split('\n').slice(0, 6)) {
-        const truncated = l.slice(0, boxW - 4);
-        lines.push(`│ ${fg(t.text.base, truncated.padEnd(boxW - 4))} │`);
+        lines.push(`│ ${padToWidth(fg(t.text.base, l.slice(0, boxW - 6)), boxW - 4)} │`);
       }
     }
 
@@ -171,13 +172,13 @@ export class PromptComposer {
     // Render multiline input with cursor
     const linesText = buffer.split('\n');
     if (linesText.length === 0 || buffer === '') {
-      lines.push(`│ ${modeBadge} ${dim('Type prompt, @file, /command, or !shell...')}█${' '.repeat(Math.max(0, boxW - 48))}│`);
+      lines.push(`│ ${padToWidth(`${modeBadge} ${dim('Type prompt, @file, /command, or !shell...')}█`, boxW - 4)} │`);
     } else {
       for (let i = 0; i < linesText.length; i++) {
         let l = linesText[i];
         if (i === linesText.length - 1) l += '█';
-        const padded = l.padEnd(boxW - 4);
-        lines.push(`│ ${l.startsWith('!') ? fg(t.text.error, padded) : l.startsWith('/') ? fg(t.text.action, padded) : padded} │`);
+        const formatted = l.startsWith('!') ? fg(t.text.error, l) : l.startsWith('/') ? fg(t.text.action, l) : l;
+        lines.push(`│ ${padToWidth(formatted, boxW - 4)} │`);
       }
     }
 
@@ -189,11 +190,14 @@ export class PromptComposer {
     const modelBadge = fgBg(t.text.base, t.background.activeTab, ` ${chatRouter.getDefaultModel()} `);
     const agentBadge = fg(t.text.extmarkAgent, ' [Sauron Agent] ');
 
-    const footerLeft = ` ${spinStr} │ ${modelBadge} │ ${agentBadge}`;
-    const footerRight = fg(t.text.muted, 'press return to submit, shift+return for newline ');
-    const pad = Math.max(0, boxW - 65);
+    const footerLeft = `${spinStr} │ ${modelBadge} │ ${agentBadge}`;
+    const footerRight = fg(t.text.muted, 'press return to submit, shift+return for newline');
 
-    lines.push(`│${footerLeft}${' '.repeat(pad)}${footerRight}│`);
+    const leftVis = visibleLen(footerLeft);
+    const rightVis = visibleLen(footerRight);
+    const pad = Math.max(0, boxW - 4 - leftVis - rightVis);
+
+    lines.push(`│ ${footerLeft}${' '.repeat(pad)}${footerRight} │`);
     lines.push(fg(t.border.focus, `└${border}┘`));
 
     return lines;
