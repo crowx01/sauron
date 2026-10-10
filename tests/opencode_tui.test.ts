@@ -74,4 +74,15 @@ describe('OpenCode TUI Architecture Suite', () => {
     expect(pLines.length).toBeGreaterThan(3);
     expect(pLines.join('\n')).toContain('Ready');
   });
+
+  test('Sessions: clearAllSessions removes all saved sessions and resets workspace session', () => {
+    const { sessionStore } = require('../src/session');
+    sessionStore.createSession('Session A');
+    sessionStore.createSession('Session B');
+    expect(sessionStore.listSessions().length).toBeGreaterThanOrEqual(2);
+
+    sessionStore.clearAllSessions();
+    expect(sessionStore.listSessions().length).toBe(1);
+    expect(sessionStore.getActiveSession().messages.length).toBe(0);
+  });
 });

@@ -122,6 +122,24 @@ export class SessionStore {
     this.saveSession(session);
   }
 
+  public clearAllSessions(): void {
+    const sessionDir = configManager.getConfig().sessionDir;
+    if (existsSync(sessionDir)) {
+      try {
+        const files = readdirSync(sessionDir);
+        for (const file of files) {
+          if (file.endsWith('.json') || file.endsWith('.jsonl') || file.includes('.corrupt-') || file.endsWith('.tmp')) {
+            try {
+              unlinkSync(join(sessionDir, file));
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+    this.activeSession = undefined;
+    this.createSession('New Session');
+  }
+
   public compactContext(sessionId?: string): void {
     const session = sessionId ? (this.loadSession(sessionId) || this.getActiveSession()) : this.getActiveSession();
     if (session.messages.length > 10) {

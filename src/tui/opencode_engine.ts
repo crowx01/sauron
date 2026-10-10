@@ -254,7 +254,12 @@ export class OpenCodeEngine {
         }
         return true;
       case '/sessions':
-        modalManager.openModal('session_drawer');
+        if (arg === 'clear' || arg === 'reset' || arg === 'delete' || arg === 'all') {
+          sessionStore.clearAllSessions();
+          this.notify('Cleared all saved conversation sessions.');
+        } else {
+          modalManager.openModal('session_drawer');
+        }
         return true;
       case '/palette':
       case '/commands':
@@ -267,7 +272,12 @@ export class OpenCodeEngine {
         sessionStore.createSession('New Session');
         return true;
       case '/clear':
-        sessionStore.clearActiveSession();
+        if (arg === 'all' || arg === 'sessions') {
+          sessionStore.clearAllSessions();
+          this.notify('Cleared all saved conversation sessions.');
+        } else {
+          sessionStore.clearActiveSession();
+        }
         return true;
       case '/compact':
         sessionStore.compactContext();
