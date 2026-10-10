@@ -1717,7 +1717,7 @@ class _BoxedPrompt:
             ]),
             floats=[
                 Float(
-                    content=CompletionsMenu(max_height=8, scrollbar=True),
+                    content=CompletionsMenu(max_height=8),
                     bottom=2, left=2,
                 )
             ]
@@ -1969,7 +1969,7 @@ class _FullScreenUI:
                     z_index=100,
                 ),
                 Float(
-                    content=CompletionsMenu(max_height=8, scrollbar=True),
+                    content=CompletionsMenu(max_height=8),
                     bottom=3, left=4,
                     z_index=90,
                 ),
