@@ -2544,7 +2544,8 @@ def _plan_exec_parts(goal: str | None, plan_text: str, plan_path: str,
         else:
             g = goal or ("Execute and complete this plan step by step, verifying each result:\n"
                          + (plan_text or ""))
-        parts = ["pal", "mission", g, "--json"]
+        max_iters = os.getenv("PAL_MISSION_MAX_ITERS", "10")
+        parts = ["pal", "mission", g, "--json", "--max-iters", max_iters]
         if ptype == "security":
             # compliant + capable security team (gpt-oss refuses auth testing)
             parts += ["--writer", "nemotron-3-ultra", "--executor", "nemotron-3-ultra"]
@@ -2730,12 +2731,12 @@ async def _watch_and_retry(pid, res_path, goal, plan_text, model, ptype,
                            attempt=1, max_attempts=None):
     """Wait for a backgrounded plan run to finish, CHECK its results, and — if it
     failed — troubleshoot from what it sees and relaunch with a revised approach,
-    up to PAL_PLAN_MAX_RETRIES (default 3). Never crashes the REPL."""
+    up to PAL_PLAN_MAX_RETRIES (default 10). Never crashes the REPL."""
     if max_attempts is None:
         try:
-            max_attempts = max(1, int(os.getenv("PAL_PLAN_MAX_RETRIES", "3")))
+            max_attempts = max(1, int(os.getenv("PAL_PLAN_MAX_RETRIES", "10")))
         except ValueError:
-            max_attempts = 3
+            max_attempts = 10
     try:
         await _await_pid(pid)
         data = _read_results(res_path)

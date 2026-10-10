@@ -13,14 +13,56 @@
       "supports_json_mode": "Whether the model can guarantee valid JSON output",
       "supports_function_calling": "Whether the model supports function/tool calling",
       "supports_images": "Whether the model can process images/visual input",
-      "max_image_size_mb": "Maximum total size in MB for all images combined (capped at 40MB max for custom models)",
-      "supports_temperature": "Whether the model accepts temperature parameter in API calls (set to false for O3/O4 reasoning models)",
-      "temperature_constraint": "Type of temperature constraint: 'fixed' (fixed value), 'range' (continuous range), 'discrete' (specific values), or omit for default range",
       "description": "Human-readable description of the model",
       "intelligence_score": "1-20 human rating used as the primary signal for auto-mode model ordering"
     }
   },
   "models": [
+    {
+      "model_name": "claude-sonnet-4-6",
+      "friendly_name": "Claude Sonnet 4.6 (Thinking)",
+      "aliases": ["sonnet4.6", "sonnet-4.6", "claude-sonnet"],
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": true,
+      "max_image_size_mb": 20.0,
+      "supports_temperature": true,
+      "description": "Claude Sonnet 4.6 with extended reasoning",
+      "intelligence_score": 19
+    },
+    {
+      "model_name": "claude-opus-4-6-thinking",
+      "friendly_name": "Claude Opus 4.6 (Thinking)",
+      "aliases": ["opus4.6", "opus-4.6", "claude-opus"],
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": true,
+      "max_image_size_mb": 20.0,
+      "supports_temperature": true,
+      "description": "Claude Opus 4.6 with maximum reasoning depth",
+      "intelligence_score": 20
+    },
+    {
+      "model_name": "gpt-oss-120b-medium",
+      "friendly_name": "GPT-OSS 120B (Medium)",
+      "aliases": ["oss120-medium", "gpt-oss-120b-med"],
+      "context_window": 131072,
+      "max_output_tokens": 32768,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "GPT-OSS 120B Medium reasoning effort",
+      "intelligence_score": 15
+    },
     {
       "model_name": "openai/gpt-oss-120b",
       "aliases": [
