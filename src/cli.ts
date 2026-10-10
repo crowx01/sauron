@@ -1,4 +1,4 @@
-import { openCodeTUIEngine } from './tui';
+import { openCodeTUIEngine, OpenCodeEngine } from './tui';
 import { chatRouter } from './router';
 import { sessionStore } from './session';
 import { toolBelt } from './tools';
@@ -31,8 +31,10 @@ async function main() {
 
   switch (cmd) {
     case 'chat':
-      await openCodeTUIEngine.start();
+      const engine = new OpenCodeEngine();
+      engine.start();
       break;
+
 
     case 'run': {
       const prompt = requireText(args.slice(1), 'Usage: sauron run "<task>"');

@@ -35,18 +35,21 @@ This log documents all file changes, additions, modifications, and removals perf
 | `src/agent/playbooks.ts` | **Added** | PlaybookStore with tactical knowledge distillation, parameterized template instantiation (`{{var}}`), and semantic goal recall. |
 | `src/agent/resolver.ts` | **Added** | ToolResolver providing capability-based command alternatives, auto-mutation on exit code 127 / command not found, and learned persistence in `~/.sauron/resolutions.json`. |
 | `src/agent/planner.ts` | **Added** | Dynamic DAGPlanner decomposing non-trivial goals into Recon $\rightarrow$ Inspect $\rightarrow$ Verify nodes, topological scheduling, and dynamic finding propagation. |
-| `src/tui/screen.ts` | **Added** | Terminal screen primitive managing raw mode, alternate screen buffer, synchronized output (`\x1b[?2026h`), panic recovery traps, and coordinated interrupts. |
-| `src/tui/components.ts` | **Added** | OpenCode-styled components (`Header`, `Transcript`, `Prompt`, `ToolCard`, `StatusLine`) with defense-in-depth ANSI/OSC stripping. |
-| `src/tui/engine.ts` | **Added** | Full interactive TUI engine with isolated Prompt ErrorBoundary, dynamic viewport bounds calculation, and context compaction triggers. |
-| `src/tui/index.ts` | **Added** | High-level TUI entry point integrating screen, engine, and top-level process signal handlers. |
-| `src/cli.ts` | **Added** | Main TypeScript CLI router handling `chat`, `run`, `mission`, `diag`, `models`, `sessions`, `debate`, `distill`, `selftest`. |
-| `tests/adversarial.test.ts` | **Added** | 39 stress and adversarial tests (50 concurrent streams, process group kills, 1MB output flood, argument fuzzing, SSRF blocking). |
-| `tests/agentic_logic.test.ts` | **Added** | 9 logic and security tests (L1–L9) covering ReAct loop, injection defense, 30/40/30 rubric, rate-limit cooldowns, ANSI stripping, and compaction. |
-| `tests/intelligence_and_dag.test.ts` | **Added** | 8 cognitive autonomy tests (I1–I8) covering PlaybookStore recall, trace distillation, parameter templating, ToolResolver auto-mutation, and DAG planning. |
-| `tests/e2e_cli.test.ts` | **Added** | 7 CLI end-to-end command tests (`diag`, `models`, `sessions`, `mission`, `run`, `debate`, `selftest`). |
-| `tests/scenarios.test.ts` | **Added** | 8 comprehensive scenarios covering streaming, fact memory, tool execution, model switching, fallback chains, missions, multiline layout, and compaction. |
-| `tests/stress_and_lifecycle.test.ts` | **Added** | 7 stress and lifecycle tests (corrupt session quarantine, path traversal, 1MB cap, SSRF, rapid writes). |
-| `tests/engine.test.ts` | **Added** | 5 core engine tests exercising ChatRouter, ToolBelt, SessionStore, MissionRunner, and streaming. |
+| `src/tui/themes.ts` | **Added** | 34 bundled OpenCode color palettes (`opencode`, `catppuccin-macchiato`, `dracula`, `tokyonight`, `one-dark`, `nord`, etc.) & token resolution engine. |
+| `src/tui/keymaps.ts` | **Added** | OpenCode keybindings layer, leader key (`ctrl+x`), Emacs input actions (`ctrl+a`, `ctrl+e`, `ctrl+k`), and shortcuts registry (`ctrl+p`, `<leader>m`, `<leader>l`, `<leader>t`, `<leader>d`, `<leader>k`). |
+| `src/tui/modals.ts` | **Added** | Full-screen modal overlay system (`ModelSelectorDialog`, `SessionDrawerDialog`, `CommandPaletteDialog`, `ThemeSelectorDialog`, `HelpWhichKeyDialog`, `DiffViewerModal`). |
+| `src/tui/views.ts` | **Added** | Rich OpenCode component renderers (`SessionTabBar`, `SidebarPane`, `MessageCardRenderer`, `BlockTool`, `PatchDiff`, `PromptComposer` with `AssistantFooter` and extmarks). |
+| `src/tui/opencode_engine.ts` | **Added** | Full OpenCode terminal UI engine managing double-buffered alternate screen (`\x1b[?1049h`), synchronized output (`\x1b[?2026h`), split-pane layout, and keyboard router. |
+| `src/tui/index.ts` | **Added** | High-level TUI exports. |
+| `src/cli.ts` | **Modified** | Main TypeScript CLI router launching `OpenCodeEngine` directly for interactive chat. |
+| `tests/opencode_tui.test.ts` | **Added** | 4 unit and integration tests validating themes, keymaps, modal dialogs, and component renderers. |
+| `tests/adversarial.test.ts` | **Added** | 39 stress and adversarial tests. |
+| `tests/agentic_logic.test.ts` | **Added** | 9 logic and security tests (L1–L9). |
+| `tests/intelligence_and_dag.test.ts` | **Added** | 8 cognitive autonomy tests (I1–I8). |
+| `tests/e2e_cli.test.ts` | **Added** | 7 CLI end-to-end command tests. |
+| `tests/scenarios.test.ts` | **Added** | 8 comprehensive scenario tests. |
+| `tests/stress_and_lifecycle.test.ts` | **Added** | 7 stress and lifecycle tests. |
+| `tests/engine.test.ts` | **Added** | 5 core engine tests. |
 
 ---
 
@@ -58,7 +61,8 @@ This log documents all file changes, additions, modifications, and removals perf
 ---
 
 ## Verification Summary
-- **Bun Automated Test Suites**: **83 pass, 0 fail, 2760 expect() calls across 7 test files** (`bun test`).
-- **CLI Commands Verified**: `sauron diag`, `sauron models`, `sauron run`, `sauron mission`, `sauron debate`, `sauron sessions`, `sauron selftest`.
+- **Bun Automated Test Suites**: **87 pass, 0 fail, 2784 expect() calls across 8 test files** (`bun test`).
+- **CLI Commands Verified**: `sauron chat`, `sauron diag`, `sauron models`, `sauron run`, `sauron mission`, `sauron debate`, `sauron sessions`, `sauron selftest`.
 - **Zero Python Invocations**: Verified 0 Python processes spawned during any production CLI execution.
+
 
