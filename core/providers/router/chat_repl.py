@@ -93,8 +93,9 @@ class _ReplState:
         self.perm = perm if perm in _PERM_MODES else "auto"
         self.model = model
         self.cwd = cwd
-        self.session_id = session_id
-        self.ctx_pct = 0      # % of context window used (F2)
+        self.ctx_pct = 0.1     # % of context window used (F2)
+        self.used_tokens = 350
+        self.total_tokens = 128000
         self.queued = 0       # messages queued while a turn runs (F4)
         self.busy = False     # a turn is in flight (F4/F5)
 
@@ -293,22 +294,44 @@ def _render_diff(path: str, before: str, after: str) -> None:
 _CTX_WINDOW_DEFAULT = int(os.getenv("PAL_CHAT_CTX_WINDOW", "128000"))
 
 
-def _context_pct(history, model: str = "") -> int:
-    """Rough % of the context window used by the rolling history (~4 chars/token)."""
+def _fmt_tokens(n: int) -> str:
+    """Format token counts compactly (e.g. 12.4k, 1.05M)."""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    elif n >= 1_000:
+        return f"{n/1_000:.1f}k"
+    return str(n)
+
+
+def _context_stats(history, model: str = "") -> tuple[float, int, int]:
+    """Accurate context usage stats: (percentage, used_tokens, total_capacity)."""
     try:
-        used = len(_ctx_render(history)) // 4
-        return max(0, min(99, round(used / max(1, _CTX_WINDOW_DEFAULT) * 100)))
+        from providers.router import size_guard
+        cap = size_guard.cap_for(model) if model else _CTX_WINDOW_DEFAULT
+        if cap <= 0:
+            cap = _CTX_WINDOW_DEFAULT
+        used = len(_ctx_render(history)) // 4 + 350
+        pct = max(0.1, min(99.9, round((used / cap) * 100.0, 1)))
+        return pct, used, cap
     except Exception:  # noqa: BLE001
-        return 0
+        return 0.1, 350, _CTX_WINDOW_DEFAULT
+
+
+def _context_pct(history, model: str = "") -> float:
+    """Rough % of the context window used by the rolling history."""
+    pct, _used, _cap = _context_stats(history, model)
+    return pct
 
 
 def _footer_extra(state) -> str:
-    """Footer suffix: '(N queued)' (F4) and 'N% ctx' (F2), when non-zero."""
+    """Footer suffix: '(N queued)' (F4) and context token stats (F2)."""
     bits = []
     if getattr(state, "queued", 0):
         bits.append(f"({state.queued} queued)")
-    if getattr(state, "ctx_pct", 0):
-        bits.append(f"{state.ctx_pct}% ctx")
+    pct = getattr(state, "ctx_pct", 0.1)
+    used = getattr(state, "used_tokens", 350)
+    cap = getattr(state, "total_tokens", 128000)
+    bits.append(f"ctx {_fmt_tokens(used)}/{_fmt_tokens(cap)} ({pct:.1f}%)")
     return ("  ·  " + "  ·  ".join(bits)) if bits else ""
 
 
@@ -1590,17 +1613,18 @@ def _box_style():
     })
 
 
-def _rounded_frame(body):
+def _rounded_frame(body, height=None):
     """A Sauron prompt frame with rounded corners (╭─╮│╰─╯).
 
     Built from the same Window/VSplit/HSplit primitives prompt_toolkit's own
     Frame uses — only the six border glyphs differ, because the stock Frame
     hardcodes square corners and exposes no way to round them."""
     from functools import partial
-
     from prompt_toolkit.layout import HSplit, VSplit, Window
+    from prompt_toolkit.layout.dimension import Dimension
 
     fill = partial(Window, style="class:frame.border")
+    h = height if height is not None else Dimension(min=3, max=10, weight=1)
     return HSplit(
         [
             VSplit([fill(width=1, height=1, char="╭"), fill(char="─"),
@@ -1610,7 +1634,9 @@ def _rounded_frame(body):
                     fill(width=1, height=1, char="╯")], height=1),
         ],
         style="class:input-frame",
+        height=h,
     )
+
 
 
 class _BoxedPrompt:
@@ -2866,7 +2892,7 @@ async def _run(handle):
         state.busy = False
         _CANCEL.clear()
         try:
-            state.ctx_pct = _context_pct(history, selected_model or "")
+            state.ctx_pct, state.used_tokens, state.total_tokens = _context_stats(history, selected_model or "")
         except Exception:  # noqa: BLE001
             pass
         try:

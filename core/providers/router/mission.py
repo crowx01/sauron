@@ -1078,7 +1078,7 @@ async def run_mission(
     assessment = assess_mission(goal) if auto else {"type": "general", "complexity": 3}
     team = _team_for(assessment["complexity"])
     mtype = assessment["type"]
-    max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "4"))
+    max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "10"))
 
     # ENSEMBLE (M3): use the whole roster as one synthesized team. Default "all"
     # engages the panel for EVERY mission that has at least PAL_MISSION_MIN_MODELS
@@ -1218,14 +1218,52 @@ async def run_mission(
             }
         feedback = verdict.get("feedback", "")
 
-    return {"status": "INCOMPLETE", "mode": "team", "iterations": max_iters,
-            "assessment": assessment, "team_size": 3 + len(reviewer_models),
-            "writer": writer, "executor": executor, "reviewers": reviewer_models,
-            "judge": judge, "transcript": transcript}
+def format_mission_summary(result: dict) -> dict:
+    """Formats a concise completion brief summarizing objective, accomplishments,
+    attempts, verification results, and artifact paths.
+    
+    Statuses: SUCCESS, PARTIAL SUCCESS, FAILED, BLOCKED, CANCELED
+    """
+    raw_status = str(result.get("status", "")).upper()
+    if raw_status in ("COMPLETE", "SUCCESS"):
+        terminal_status = "SUCCESS"
+    elif raw_status == "PARTIAL":
+        terminal_status = "PARTIAL SUCCESS"
+    elif raw_status in ("BLOCKED", "DEPENDENCY_ERROR"):
+        terminal_status = "BLOCKED"
+    elif raw_status in ("CANCELED", "CANCELLED", "INTERRUPTED"):
+        terminal_status = "CANCELED"
+    else:
+        terminal_status = "FAILED"
+
+    iters = result.get("iterations", 1)
+    max_iters = result.get("max_iters", 10)
+    mode = result.get("mode", "team")
+    
+    written = []
+    if "transcript" in result:
+        for t in result["transcript"]:
+            written.extend(t.get("exec", {}).get("files_written", []))
+            written.extend(t.get("exec", {}).get("edits_applied", []))
+
+    brief_lines = [
+        f"=== MISSION BRIEF: {terminal_status} ===",
+        f"Attempts: {iters}/{max_iters} (Mode: {mode})",
+    ]
+    if written:
+        brief_lines.append(f"Modified Artifacts ({len(written)}): " + ", ".join(list(set(written))[:5]))
+    if result.get("no_progress"):
+        brief_lines.append(f"Stall Reason: {result.get('no_progress_reason', 'no progress')}")
+    brief_lines.append("================================")
+    
+    result["terminal_status"] = terminal_status
+    result["summary_brief"] = "\n".join(brief_lines)
+    return result
 
 
 def run_mission_sync(goal: str, **kwargs) -> dict:
-    return asyncio.run(run_mission(goal, **kwargs))
+    res = asyncio.run(run_mission(goal, **kwargs))
+    return format_mission_summary(res)
 
 
 def main(argv: list[str]) -> int:
