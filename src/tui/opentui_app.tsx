@@ -1,20 +1,19 @@
-/**
- * SAURON v2.0 OPENCODE TUI ARCHITECTURE (OpenTUI + SolidJS JSX)
- * Non-Blocking Prompt Queue, Queue Consumer, Responsive Breakpoints & OpenTUI Renderer
- */
-
 import { render, useKeyboard, useTerminalDimensions } from '@opentui/solid';
-import { createSignal, createEffect, For, Show } from 'solid-js';
+import { createSignal, createEffect, onCleanup, For, Show } from 'solid-js';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
 import { themeStore } from './themes';
+import { OpenCodeEngine } from './opencode_engine';
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 export function OpenTUIApp() {
   const dimensions = useTerminalDimensions();
   const [prompt, setPrompt] = createSignal('');
   const [promptQueue, setPromptQueue] = createSignal<string[]>([]);
   const [isBusy, setIsBusy] = createSignal(false);
-  const [activeModal, setActiveModal] = createSignal<'none' | 'model_picker' | 'command_palette'>('none');
+  const [spinnerIdx, setSpinnerIdx] = createSignal(0);
+  const [activeModal, setActiveModal] = createSignal<'none' | 'model_picker' | 'session_drawer' | 'command_palette' | 'theme_picker' | 'which_key'>('none');
   const [selectedModel, setSelectedModel] = createSignal(chatRouter.getDefaultModel());
   const [messages, setMessages] = createSignal(sessionStore.getActiveSession().messages);
   const [sidebarPref, setSidebarPref] = createSignal(true);
@@ -23,33 +22,181 @@ export function OpenTUIApp() {
   const showSidebar = () => sidebarPref() && dimensions().width >= 80;
   const sidebarWidth = () => Math.min(32, Math.floor(dimensions().width * 0.25));
 
-  // Keyboard router
+  // Reactive Animated Thinking Spinner Ticker
+  createEffect(() => {
+    if (isBusy()) {
+      const timer = setInterval(() => {
+        setSpinnerIdx((i) => (i + 1) % SPINNER_FRAMES.length);
+      }, 80);
+      onCleanup(() => clearInterval(timer));
+    }
+  });
+
+  const selectModel = (modelName: string) => {
+    const resolved = chatRouter.resolveModel(modelName);
+    if (resolved) {
+      chatRouter.setDefaultModel(resolved);
+      setSelectedModel(resolved);
+      sessionStore.addMessage('system', `Switched active model to: ${resolved}`);
+      setMessages([...sessionStore.getActiveSession().messages]);
+    }
+    setActiveModal('none');
+  };
+
+  const selectTheme = (themeName: string) => {
+    themeStore.setTheme(themeName);
+    sessionStore.addMessage('system', `Switched active theme to: ${themeName}`);
+    setMessages([...sessionStore.getActiveSession().messages]);
+    setActiveModal('none');
+  };
+
+  // Keyboard router: Full typing, shortcuts, modal navigation & slash command palette
   useKeyboard((key) => {
     if (key.ctrl && key.name === 'c') {
       process.exit(0);
     }
     if (key.ctrl && key.name === 'p') {
       setActiveModal(activeModal() === 'command_palette' ? 'none' : 'command_palette');
+      return;
+    }
+    if (key.ctrl && key.name === 'm') {
+      setActiveModal(activeModal() === 'model_picker' ? 'none' : 'model_picker');
+      return;
+    }
+    if (key.ctrl && key.name === 't') {
+      setActiveModal(activeModal() === 'theme_picker' ? 'none' : 'theme_picker');
+      return;
     }
     if (key.ctrl && key.name === 'b') {
       setSidebarPref(!sidebarPref());
+      return;
     }
-    if (key.name === 'escape') {
-      if (activeModal() !== 'none') {
+
+    // Modal navigation
+    if (activeModal() !== 'none') {
+      if (key.name === 'escape') {
         setActiveModal('none');
-      } else if (promptQueue().length > 0) {
-        setPromptQueue([]); // Clear pending queue on Escape
+        return;
+      }
+      const modal = activeModal();
+      if (modal === 'model_picker') {
+        if (key.name === '1') { selectModel('claude-3-7-sonnet'); return; }
+        if (key.name === '2') { selectModel('gpt-4o'); return; }
+        if (key.name === '3') { selectModel('gemini-2.0-flash'); return; }
+        if (key.name === '4') { selectModel('claude-cli'); return; }
+        if (key.name === '5') { selectModel('deepseek-r1'); return; }
+      }
+      if (modal === 'theme_picker') {
+        if (key.name === '1') { selectTheme('opencode-dark'); return; }
+        if (key.name === '2') { selectTheme('dracula'); return; }
+        if (key.name === '3') { selectTheme('catppuccin'); return; }
+        if (key.name === '4') { selectTheme('monokai'); return; }
+        if (key.name === '5') { selectTheme('tokyo-night'); return; }
+      }
+      if (modal === 'command_palette') {
+        if (key.name === '1') { setActiveModal('model_picker'); return; }
+        if (key.name === '2') { setActiveModal('theme_picker'); return; }
+        if (key.name === '3') { setActiveModal('session_drawer'); return; }
+        if (key.name === '4') { sessionStore.compactContext(); setMessages([...sessionStore.getActiveSession().messages]); setActiveModal('none'); return; }
+        if (key.name === '5') { sessionStore.clearActiveSession(); setMessages([]); setActiveModal('none'); return; }
+      }
+      if (modal === 'session_drawer') {
+        if (key.name === '1' || key.name === 'n') {
+          sessionStore.createSession('New Session');
+          setMessages([...sessionStore.getActiveSession().messages]);
+          setActiveModal('none');
+          return;
+        }
+      }
+      return;
+    }
+
+    // Normal Input Handling
+    if (key.name === 'escape') {
+      setPrompt('');
+      if (promptQueue().length > 0) setPromptQueue([]);
+      return;
+    }
+
+    if (key.name === 'return' || key.name === 'enter') {
+      handleSubmit();
+      return;
+    }
+
+    if (key.name === 'backspace') {
+      setPrompt((p) => p.slice(0, -1));
+      return;
+    }
+
+    if (key.name === 'space') {
+      setPrompt((p) => p + ' ');
+      return;
+    }
+
+    // Capture character typing (including / to trigger slash commands)
+    if (!key.ctrl && !key.meta) {
+      const char = key.sequence || (key.name && key.name.length === 1 ? key.name : null);
+      if (char && char.length === 1 && char >= ' ' && char <= '~') {
+        setPrompt((p) => p + char);
       }
     }
   });
 
-  // Prompt Submit: UNBLOCKS INPUT IMMEDIATELY by pushing to promptQueue
+  // Prompt Submit: Handles Slash Commands (/) and Non-Blocking Queueing
   const handleSubmit = () => {
     const text = prompt().trim();
     if (!text) return;
 
-    // Clear input buffer immediately so user can continue typing next prompt!
     setPrompt('');
+
+    // Slash Commands Execution (/model, /theme, /sessions, /palette, /help, /clear, /compact, /quit)
+    if (text.startsWith('/')) {
+      const [cmd, ...args] = text.split(/\s+/);
+      const command = cmd.toLowerCase();
+      switch (command) {
+        case '/':
+        case '/palette':
+        case '/commands':
+          setActiveModal('command_palette');
+          return;
+        case '/model':
+        case '/models':
+          if (args.length > 0) {
+            selectModel(args.join(' '));
+          } else {
+            setActiveModal('model_picker');
+          }
+          return;
+        case '/theme':
+        case '/themes':
+          if (args.length > 0) {
+            selectTheme(args.join(' '));
+          } else {
+            setActiveModal('theme_picker');
+          }
+          return;
+        case '/session':
+        case '/sessions':
+          setActiveModal('session_drawer');
+          return;
+        case '/help':
+        case '/keys':
+          setActiveModal('which_key');
+          return;
+        case '/clear':
+          sessionStore.clearActiveSession();
+          setMessages([]);
+          return;
+        case '/compact':
+          sessionStore.compactContext();
+          setMessages([...sessionStore.getActiveSession().messages]);
+          return;
+        case '/exit':
+        case '/quit':
+          process.exit(0);
+          return;
+      }
+    }
 
     sessionStore.addMessage('user', text);
     setMessages([...sessionStore.getActiveSession().messages]);
@@ -104,7 +251,7 @@ export function OpenTUIApp() {
         <text color="#38bdf8" bold> SAURON v2.0 OPENCODE TUI </text>
         <text color="#64748b"> │ active: {sessionStore.getActiveSession().title} │ </text>
         <text color="#a855f7"> model: {selectedModel()} </text>
-        <text color="#64748b"> (ctrl+p palette, ctrl+b sidebar, ctrl+c quit) </text>
+        <text color="#64748b"> (type / for palette, ctrl+p, ctrl+b sidebar, ctrl+c quit) </text>
       </box>
 
       {/* Main Area: Responsive Sidebar + Scrollbox Transcript */}
@@ -137,6 +284,18 @@ export function OpenTUIApp() {
         </scrollbox>
       </box>
 
+      {/* Inline Slash Command Auto-Complete Box (triggers when prompt starts with /) */}
+      <Show when={prompt().startsWith('/') && activeModal() === 'none'}>
+        <box flexDirection="column" width="100%" backgroundColor="#0284c7" padding={1}>
+          <text color="#ffffff" bold> SLASH COMMAND AUTOCOMPLETE (Press Enter to execute) </text>
+          <text color="#e0f2fe"> /model [name]   - Select AI model (1: claude-3-7-sonnet, 2: gpt-4o, 3: gemini-2.0-flash) </text>
+          <text color="#e0f2fe"> /theme [name]   - Change UI theme (1: opencode-dark, 2: dracula, 3: catppuccin) </text>
+          <text color="#e0f2fe"> /sessions       - Open sessions drawer </text>
+          <text color="#e0f2fe"> /compact        - Compact context memory </text>
+          <text color="#e0f2fe"> /clear          - Clear transcript </text>
+        </box>
+      </Show>
+
       {/* Bottom Prompt Input Area (Non-Blocking) */}
       <box flexDirection="column" width="100%" height={4} borderStyle="single" borderColor="#38bdf8">
         <box flexDirection="row" width="100%">
@@ -145,36 +304,87 @@ export function OpenTUIApp() {
         </box>
         <box flexDirection="row" width="100%" backgroundColor="#1e293b">
           <text color={isBusy() ? '#facc15' : '#4ade80'}>
-            {isBusy() ? '⠋ Streaming...' : '● Ready'} │ Model: {selectedModel()}
+            {isBusy() ? `${SPINNER_FRAMES[spinnerIdx()]} Assistant thinking & streaming...` : '● Ready'} │ Model: {selectedModel()}
           </text>
           <Show when={promptQueue().length > 0}>
             <text color="#a855f7" bold> │ Queued Prompts: {promptQueue().length} </text>
           </Show>
-          <text color="#64748b"> │ Non-blocking typing active </text>
+          <text color="#64748b"> │ Type / for commands palette </text>
         </box>
       </box>
 
-      {/* Responsive Centered Modal Overlay */}
+      {/* Responsive Centered Modal Overlay: Command Palette */}
       <Show when={activeModal() === 'command_palette'}>
         <box
           position="absolute"
-          top={Math.max(2, Math.floor((dimensions().height - 14) / 2))}
+          top={Math.max(2, Math.floor((dimensions().height - 16) / 2))}
           left={Math.max(2, Math.floor((dimensions().width - 64) / 2))}
           width={Math.min(64, dimensions().width - 4)}
-          height={14}
+          height={16}
           borderStyle="double"
           borderColor="#38bdf8"
           backgroundColor="#0f172a"
           flexDirection="column"
           padding={1}
         >
-          <text color="#38bdf8" bold> COMMAND PALETTE (Ctrl+P) </text>
+          <text color="#38bdf8" bold> SLASH COMMANDS & PALETTE (/) </text>
           <text color="#64748b">────────────────────────────</text>
-          <text color="#e2e8f0"> 1. Switch AI Model (Ctrl+M) </text>
-          <text color="#e2e8f0"> 2. New Conversation Session (Ctrl+N) </text>
-          <text color="#e2e8f0"> 3. Toggle Sidebar (Ctrl+B) </text>
-          <text color="#e2e8f0"> 4. Compact Context Memory </text>
-          <text color="#f87171"> Press Escape to close </text>
+          <text color="#e2e8f0"> 1. Switch AI Model (/model) </text>
+          <text color="#e2e8f0"> 2. Theme Selector (/theme) </text>
+          <text color="#e2e8f0"> 3. Sessions Drawer (/sessions) </text>
+          <text color="#e2e8f0"> 4. Compact Context Memory (/compact) </text>
+          <text color="#e2e8f0"> 5. Clear Current Transcript (/clear) </text>
+          <text color="#f87171"> Press 1-5 to select, or Escape to close </text>
+        </box>
+      </Show>
+
+      {/* Responsive Centered Modal Overlay: Model Picker */}
+      <Show when={activeModal() === 'model_picker'}>
+        <box
+          position="absolute"
+          top={Math.max(2, Math.floor((dimensions().height - 16) / 2))}
+          left={Math.max(2, Math.floor((dimensions().width - 64) / 2))}
+          width={Math.min(64, dimensions().width - 4)}
+          height={16}
+          borderStyle="double"
+          borderColor="#38bdf8"
+          backgroundColor="#0f172a"
+          flexDirection="column"
+          padding={1}
+        >
+          <text color="#38bdf8" bold> MODEL SELECTOR PICKER (/model) </text>
+          <text color="#64748b">────────────────────────────</text>
+          <text color="#a855f7" bold> 1. claude-3-7-sonnet [Anthropic] </text>
+          <text color="#e2e8f0"> 2. gpt-4o [OpenAI] </text>
+          <text color="#e2e8f0"> 3. gemini-2.0-flash [Gemini] </text>
+          <text color="#e2e8f0"> 4. claude-cli [Local CLI] </text>
+          <text color="#e2e8f0"> 5. deepseek-r1 [DeepSeek] </text>
+          <text color="#f87171"> Press 1-5 to pick model, or Escape to close </text>
+        </box>
+      </Show>
+
+      {/* Responsive Centered Modal Overlay: Theme Picker */}
+      <Show when={activeModal() === 'theme_picker'}>
+        <box
+          position="absolute"
+          top={Math.max(2, Math.floor((dimensions().height - 16) / 2))}
+          left={Math.max(2, Math.floor((dimensions().width - 64) / 2))}
+          width={Math.min(64, dimensions().width - 4)}
+          height={16}
+          borderStyle="double"
+          borderColor="#38bdf8"
+          backgroundColor="#0f172a"
+          flexDirection="column"
+          padding={1}
+        >
+          <text color="#38bdf8" bold> THEME SELECTOR PICKER (/theme) </text>
+          <text color="#64748b">────────────────────────────</text>
+          <text color="#e2e8f0"> 1. opencode-dark (Default OpenCode) </text>
+          <text color="#e2e8f0"> 2. dracula </text>
+          <text color="#e2e8f0"> 3. catppuccin </text>
+          <text color="#e2e8f0"> 4. monokai </text>
+          <text color="#e2e8f0"> 5. tokyo-night </text>
+          <text color="#f87171"> Press 1-5 to pick theme, or Escape to close </text>
         </box>
       </Show>
     </box>
@@ -182,5 +392,11 @@ export function OpenTUIApp() {
 }
 
 export async function startOpenTUI() {
-  await render(() => <OpenTUIApp />, { targetFps: 30, exitOnCtrlC: false });
+  if (process.stdout.isTTY) {
+    const engine = new OpenCodeEngine();
+    engine.start();
+  } else {
+    await render(() => <OpenTUIApp />, { targetFps: 30, exitOnCtrlC: false });
+  }
 }
+

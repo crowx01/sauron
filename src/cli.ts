@@ -1,4 +1,4 @@
-import { openCodeTUIEngine, OpenCodeEngine } from './tui';
+import { startOpenTUI } from './tui';
 import { chatRouter } from './router';
 import { sessionStore } from './session';
 import { toolBelt } from './tools';
@@ -31,9 +31,9 @@ async function main() {
 
   switch (cmd) {
     case 'chat':
-      const engine = new OpenCodeEngine();
-      engine.start();
+      await startOpenTUI();
       break;
+
 
 
     case 'run': {
