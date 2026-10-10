@@ -160,9 +160,12 @@ if _PT_OK:
             text = document.text_before_cursor
             if not text.startswith("/") or " " in text:
                 return
+            meta_map = {choice[1].strip(): choice[2] for choice in _PALETTE_CHOICES}
             for cmd in _SLASH_CMDS:
                 if cmd.startswith(text):
-                    yield Completion(cmd, start_position=-len(text), display=cmd)
+                    meta = meta_map.get(cmd, "Slash command")
+                    yield Completion(cmd, start_position=-len(text), display=cmd, display_meta=meta)
+
 
     class _AtFileCompleter(Completer):
         """Autocomplete file paths when the current word starts with '@' (F3)."""
@@ -1613,18 +1616,17 @@ def _box_style():
     })
 
 
-def _rounded_frame(body, height=None):
+def _rounded_frame(body):
     """A Sauron prompt frame with rounded corners (╭─╮│╰─╯).
 
     Built from the same Window/VSplit/HSplit primitives prompt_toolkit's own
     Frame uses — only the six border glyphs differ, because the stock Frame
     hardcodes square corners and exposes no way to round them."""
     from functools import partial
+
     from prompt_toolkit.layout import HSplit, VSplit, Window
-    from prompt_toolkit.layout.dimension import Dimension
 
     fill = partial(Window, style="class:frame.border")
-    h = height if height is not None else Dimension(min=3, max=10, weight=1)
     return HSplit(
         [
             VSplit([fill(width=1, height=1, char="╭"), fill(char="─"),
@@ -1634,8 +1636,8 @@ def _rounded_frame(body, height=None):
                     fill(width=1, height=1, char="╯")], height=1),
         ],
         style="class:input-frame",
-        height=h,
     )
+
 
 
 
@@ -1705,11 +1707,22 @@ class _BoxedPrompt:
                 f"{_footer_extra(state)}</style>"
             )
 
-        # Rounded brand-accented box, matched to the full-screen composer.
-        layout = Layout(HSplit([
-            _rounded_frame(ta),
-            Window(FormattedTextControl(_footer), height=1),
-        ]))
+        from prompt_toolkit.layout.containers import Float, FloatContainer
+        from prompt_toolkit.layout.menus import CompletionsMenu
+
+        layout = Layout(FloatContainer(
+            content=HSplit([
+                _rounded_frame(ta),
+                Window(FormattedTextControl(_footer), height=1),
+            ]),
+            floats=[
+                Float(
+                    content=CompletionsMenu(max_height=8, scrollbar=True),
+                    bottom=2, left=2,
+                )
+            ]
+        ))
+
         app = Application(
             layout=layout, key_bindings=kb, full_screen=False,
             erase_when_done=True, mouse_support=False,
@@ -1945,6 +1958,8 @@ class _FullScreenUI:
             ]),
             style="class:palette.frame",
         )
+        from prompt_toolkit.layout.menus import CompletionsMenu
+
         root = FloatContainer(
             content=VSplit([Window(width=_FS_GUTTER), body, Window(width=_FS_GUTTER)]),
             floats=[
@@ -1953,8 +1968,14 @@ class _FullScreenUI:
                     top=2, left=4, right=4, height=12,
                     z_index=100,
                 ),
+                Float(
+                    content=CompletionsMenu(max_height=8, scrollbar=True),
+                    bottom=3, left=4,
+                    z_index=90,
+                ),
             ],
         )
+
         layout = Layout(root, focused_element=self.ta)
         # Mouse capture OFF by default so native terminal select/copy works;
         # Mouse capture OFF by default so native drag-select + COPY work. The

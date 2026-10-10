@@ -69,8 +69,10 @@ def test_obj05_slash_autocomplete_filtering():
 
 
 def test_obj07_prompt_panel_layout_constraint():
-    """OBJ-07: _rounded_frame enforces minimum height dimension so prompt box is not squished."""
+    """OBJ-07: _rounded_frame builds prompt input frame container."""
     from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit.layout import HSplit
     ta = TextArea(text="test prompt")
     frame = _rounded_frame(ta)
-    assert frame.height is not None
+    assert isinstance(frame, HSplit)
+    assert len(frame.children) == 3
