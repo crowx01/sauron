@@ -1145,7 +1145,11 @@ def _bubble(model: str, answer: str, *, role: str = "pal", color: str | None = N
     """Render an assistant answer with a '●' gutter and hanging-indented body
     (no box, no border) so every line aligns, like Claude Code. Errors are red."""
     if answer.startswith("__ERROR__"):
-        body = Text(answer[len("__ERROR__") :].strip(), style="red")
+        err_raw = answer[len("__ERROR__") :].strip()
+        first_line = err_raw.splitlines()[0] if err_raw else "Unknown error"
+        if len(first_line) > 120:
+            first_line = first_line[:117] + "..."
+        body = Text(f"Error ({model}): {first_line}", style="red")
         return _answer_block(body, marker_style="red")
     return _answer_block(Markdown(answer), marker_style=color or _ACCENT)
 
