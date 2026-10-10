@@ -1557,13 +1557,23 @@ def _build_prompt_session(session_id: str, state: _ReplState | None = None) -> P
     def _newline_ctrl_j(event):
         event.current_buffer.insert_text("\n")
 
-    @kb.add("c-p")  # unconditional prev, regardless of cursor line
+    @kb.add("up")
+    @kb.add("c-p")  # prev prompt from history when on top line or empty
     def _hist_prev(event):
-        event.current_buffer.history_backward()
+        buff = event.current_buffer
+        if not buff.text or buff.cursor_position_row == 0:
+            buff.history_backward()
+        else:
+            buff.cursor_up()
 
-    @kb.add("c-n")  # unconditional next, regardless of cursor line
+    @kb.add("down")
+    @kb.add("c-n")  # next prompt from history when on bottom line or empty
     def _hist_next(event):
-        event.current_buffer.history_forward()
+        buff = event.current_buffer
+        if not buff.text or buff.cursor_position_row == len(buff.lines) - 1:
+            buff.history_forward()
+        else:
+            buff.cursor_down()
 
     if state is not None:
         @kb.add("s-tab")       # Shift+Tab cycles the permission mode
@@ -1685,6 +1695,24 @@ class _BoxedPrompt:
         @kb.add("c-j")
         def _newline(event):
             ta.buffer.insert_text("\n")
+
+        @kb.add("up")
+        @kb.add("c-p")
+        def _hist_prev(event):
+            buff = ta.buffer
+            if not buff.text or buff.cursor_position_row == 0:
+                buff.history_backward()
+            else:
+                buff.cursor_up()
+
+        @kb.add("down")
+        @kb.add("c-n")
+        def _hist_next(event):
+            buff = ta.buffer
+            if not buff.text or buff.cursor_position_row == len(buff.lines) - 1:
+                buff.history_forward()
+            else:
+                buff.cursor_down()
 
         @kb.add("c-c")
         def _int(event):
