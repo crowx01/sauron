@@ -152,7 +152,11 @@ export class OpenCodeEngine {
         this.promptHistory.push(userText);
         this.historyIndex = -1;
         this.promptBuffer = '';
-        this.processUserPrompt(userText);
+        if (userText.trim().startsWith('/') && this.handleSlashCommand(userText.trim())) {
+          this.render();
+          return;
+        }
+        this.enqueueUserPrompt(userText);
       }
       return;
     }
@@ -164,10 +168,76 @@ export class OpenCodeEngine {
       return;
     }
 
-    // Plain text typing
-    if (str.length === 1 && str >= ' ' && str <= '~') {
+    // Plain text typing (also handles pasted chunks)
+    if (!key.ctrl && !key.alt && /^[\x20-\x7e\u00a0-\uffff]+$/.test(str)) {
       this.promptBuffer += str;
       this.render();
+    }
+  }
+
+  private notify(text: string) {
+    sessionStore.addMessage('system', text);
+  }
+
+  /** Handle a /command typed in the prompt. Returns true if consumed. */
+  private handleSlashCommand(line: string): boolean {
+    const [rawCmd, ...rest] = line.split(/\s+/);
+    const cmd = rawCmd.toLowerCase();
+    const arg = rest.join(' ').trim();
+
+    switch (cmd) {
+      case '/model':
+      case '/models': {
+        if (cmd === '/model' && arg) {
+          const resolved = chatRouter.resolveModel(arg);
+          if (resolved) {
+            chatRouter.setDefaultModel(resolved);
+            this.notify(`Switched active model to: ${resolved}`);
+          } else {
+            this.notify(`Unknown model "${arg}". Use /model with no argument to pick from the catalog.`);
+          }
+        } else {
+          modalManager.openModal('model_picker');
+        }
+        return true;
+      }
+      case '/theme':
+        if (arg && themeStore.listThemes().includes(arg)) {
+          themeStore.setTheme(arg);
+        } else {
+          modalManager.openModal('theme_picker');
+        }
+        return true;
+      case '/sessions':
+        modalManager.openModal('session_drawer');
+        return true;
+      case '/palette':
+      case '/commands':
+        modalManager.openModal('command_palette');
+        return true;
+      case '/keys':
+        modalManager.openModal('which_key');
+        return true;
+      case '/new':
+        sessionStore.createSession('New Session');
+        return true;
+      case '/clear':
+        sessionStore.clearActiveSession();
+        return true;
+      case '/compact':
+        sessionStore.compactContext();
+        this.notify('Context compacted.');
+        return true;
+      case '/exit':
+      case '/quit':
+        this.stop();
+        return true;
+      case '/help':
+        this.notify('Commands: /model [name] /theme [name] /sessions /palette /keys /new /clear /compact /exit  (ctrl+p palette, ctrl+x leader)');
+        return true;
+      default:
+        this.notify(`Unknown command ${cmd}. Type /help.`);
+        return true;
     }
   }
 
@@ -188,7 +258,7 @@ export class OpenCodeEngine {
         const models = ['claude-3-7-sonnet', 'gpt-4o', 'gemini-2.0-flash'];
         const cur = chatRouter.getDefaultModel();
         const next = models[(models.indexOf(cur) + 1) % models.length];
-        (chatRouter as any).defaultModel = next;
+        chatRouter.setDefaultModel(next);
         break;
       case 'CURSOR_HOME': this.cursorOffset = 0; break;
       case 'CURSOR_END': this.cursorOffset = this.promptBuffer.length; break;
@@ -201,11 +271,20 @@ export class OpenCodeEngine {
     }
   }
 
-  private async processUserPrompt(text: string) {
-    if (this.isBusy) return;
-    this.isBusy = true;
+  private promptQueue: string[] = [];
 
+  private enqueueUserPrompt(text: string) {
     sessionStore.addMessage('user', text);
+    this.promptQueue.push(text);
+    this.render();
+    this.drainQueue();
+  }
+
+  private async drainQueue() {
+    if (this.isBusy || this.promptQueue.length === 0) return;
+
+    this.isBusy = true;
+    const currentPrompt = this.promptQueue.shift();
     this.render();
 
     try {
@@ -227,6 +306,8 @@ export class OpenCodeEngine {
     } finally {
       this.isBusy = false;
       this.render();
+      // Drain next item in queue!
+      setImmediate(() => this.drainQueue());
     }
   }
 
@@ -236,18 +317,20 @@ export class OpenCodeEngine {
     const height = this.height;
 
     // Begin Synchronized Render (\x1b[?2026h)
-    let frame = '\x1b[?2026h\x1b[H';
+    let frame = '\x1b[?2026h\x1b[H\x1b[2J';
 
     // Top: Session Tab Bar
     const activeSession = sessionStore.getActiveSession();
     frame += this.tabBar.render(width, activeSession.title, sessionStore.listSessions().length, t) + '\n';
 
-    // Layout Split: Sidebar (if visible) + Main Transcript Pane
-    const sidebarW = this.sidebarVisible ? Math.min(32, Math.floor(width * 0.25)) : 0;
+    // Layout Split: Responsive Sidebar (collapses below 80 cols) + Main Transcript Pane
+    const isSidebarVisible = this.sidebarVisible && width >= 80;
+    const sidebarW = isSidebarVisible ? Math.min(32, Math.floor(width * 0.25)) : 0;
     const mainW = width - sidebarW;
     const mainH = height - 7; // Top tab bar (1) + Prompt Composer (6)
 
-    const sidebarLines = this.sidebarVisible ? this.sidebar.render(sidebarW, mainH, t) : [];
+    const sidebarLines = isSidebarVisible ? this.sidebar.render(sidebarW, mainH, t) : [];
+
     
     // Main Transcript Scrollbox
     const transcriptLines: string[] = [];
@@ -289,8 +372,20 @@ export class OpenCodeEngine {
   }
 
   private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean } {
-    if (str === '\x03') return { name: 'c', ctrl: true };
-    if (str === '\x04') return { name: 'd', ctrl: true };
+    // Ctrl+<letter> arrives as a single control byte (0x01-0x1a), excluding tab/enter/backspace
+    if (str.length === 1) {
+      const code = str.charCodeAt(0);
+      if (code >= 1 && code <= 26 && ![8, 9, 10, 13].includes(code)) {
+        return { name: String.fromCharCode(code + 96), ctrl: true };
+      }
+    }
+    // Ctrl+Alt+<letter>
+    if (str.length === 2 && str[0] === '\x1b') {
+      const code = str.charCodeAt(1);
+      if (code >= 1 && code <= 26 && ![8, 9, 10, 13].includes(code)) {
+        return { name: String.fromCharCode(code + 96), ctrl: true, alt: true };
+      }
+    }
 
     if (str === '\x1b[A' || str === '\x1bOA') return { name: 'up' };
     if (str === '\x1b[B' || str === '\x1bOB') return { name: 'down' };
