@@ -543,7 +543,7 @@ def test_tier_pool_fallback_combines_tiers():
 def test_pick_tier_selects_from_correct_tier(monkeypatch):
     """_pick_tier picks an available model from the author tier for author steps."""
     monkeypatch.setattr("providers.router.chat_repl._is_available",
-                        lambda m: m == "coder1")
+                        lambda m: m in ("coder1", "ops1"))
     monkeypatch.setenv("PAL_MISSION_CODER_TIER", "coder1,coder2")
     monkeypatch.setenv("PAL_MISSION_OPS_TIER", "ops1,ops2")
     assert mission._pick_tier("author", "code") == "coder1"

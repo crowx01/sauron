@@ -43,6 +43,32 @@ def _cmd_diag(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sessions(args: argparse.Namespace) -> int:
+    from providers.router import session_store
+
+    if args.clear:
+        ok = session_store.clear_all()
+        if ok:
+            print("Successfully cleared all stored sessions.")
+        else:
+            print("Failed to clear sessions or no sessions found.")
+        return 0
+
+    rows = session_store.recent(50)
+    if not rows:
+        print("No stored sessions found.")
+        return 0
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        print(f"=== STORED SESSIONS ({len(rows)}) ===")
+        for r in rows:
+            print(f"  {r['id']} | turns: {r['turns']} | model: {r['model'] or 'auto'} | cwd: {r['cwd']}")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pal",
@@ -61,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("diag", help="dump router + learning state")
     d.add_argument("--json", action="store_true", help="machine-readable output")
     d.set_defaults(func=_cmd_diag)
+
+    s = sub.add_parser("sessions", help="list or clear chat sessions")
+    s.add_argument("--clear", action="store_true", help="delete all stored sessions")
+    s.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    s.set_defaults(func=_cmd_sessions)
+
 
     # documented here for `pal -h`; their args are forwarded verbatim in main()
     sub.add_parser("distill", help="run the offline routing-proposal distiller (args forwarded)")

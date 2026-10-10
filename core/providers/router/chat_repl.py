@@ -2741,16 +2741,37 @@ async def _watch_and_retry(pid, res_path, goal, plan_text, model, ptype,
         data = _read_results(res_path)
         if _plan_status(data) == "success":
             _note(f"✓ plan succeeded on attempt {attempt} — {res_path}", "sys")
+            if isinstance(data, dict):
+                brief = data.get("summary_brief")
+                if not brief:
+                    from providers.router.mission import format_mission_summary
+                    brief = format_mission_summary(data).get("summary_brief")
+                if brief:
+                    console.print(brief)
             return
         reason = _plan_failure_reason(data, res_path)
         _note(f"⚠ plan attempt {attempt} failed: {reason[:200]}", "sys")
         if attempt >= max_attempts:
             _note(f"✗ gave up after {attempt} attempts — inspect {res_path}", "err")
+            if isinstance(data, dict):
+                brief = data.get("summary_brief")
+                if not brief:
+                    from providers.router.mission import format_mission_summary
+                    brief = format_mission_summary(data).get("summary_brief")
+                if brief:
+                    console.print(brief)
             return
         _note(f"↻ troubleshooting + retrying (attempt {attempt + 1}/{max_attempts})…", "sys")
         new_plan = await _troubleshoot_plan(goal, plan_text, reason, model, ptype)
         if not new_plan:
             _note("✗ troubleshooting produced no revised plan — stopping", "err")
+            if isinstance(data, dict):
+                brief = data.get("summary_brief")
+                if not brief:
+                    from providers.router.mission import format_mission_summary
+                    brief = format_mission_summary(data).get("summary_brief")
+                if brief:
+                    console.print(brief)
             return
         _pp, rp, newpid, _mode = _launch_plan_background(goal, new_plan, model, ptype)
         _note(f"↳ revised plan running in background (pid {newpid}) → {rp}", "sys")
@@ -2951,6 +2972,13 @@ async def _run(handle):
             session_id = _new_session_id()
             state.session_id = session_id
             console.print(f"[dim]context cleared — new session {session_id}[/]")
+            continue
+        if low in ("/clear_sessions", "/clearsessions") or (low.startswith("/sessions") and any(w in low for w in ("clear", "--clear", "clean", "purge", "delete"))) or (low.startswith("/session") and any(w in low for w in ("clear", "--clear", "clean", "purge", "delete"))):
+            ok = session_store.clear_all()
+            if ok:
+                _note("all stored chat sessions cleared", "ok")
+            else:
+                _note("no stored sessions found or failed to clear", "sys")
             continue
         if low in ("/sessions", "/session"):
             state.busy = False
@@ -3339,7 +3367,15 @@ async def _run(handle):
             else:
                 console.print("[dim]↳ executing via PAL (orchestrated) …[/]")
                 _mode, _cmd, _out = await _run_plan_through_pal(goal, ans, exec_model, ptype)
-                console.print(_bubble(f"pal · {_mode}", _out[:4000], role="tools", color="cyan"))
+                try:
+                    _d = json.loads(_out)
+                    _b = _d.get("summary_brief") if isinstance(_d, dict) else None
+                    if _b:
+                        console.print(_b)
+                    else:
+                        console.print(_bubble(f"pal · {_mode}", _out[:4000], role="tools", color="cyan"))
+                except Exception:
+                    console.print(_bubble(f"pal · {_mode}", _out[:4000], role="tools", color="cyan"))
             continue
 
         # /feed [text] (aliases /topal /mission) -> write the last plan (or <text>) to
@@ -3363,7 +3399,15 @@ async def _run(handle):
             else:
                 console.print("[dim]→ executing via PAL (orchestrated)…[/]")
                 _mode, _cmd, out = await _run_plan_through_pal(None, plan_text, selected_model)
-                console.print(_bubble(f"pal · {_mode}", out[:4000], role="tools", color="cyan"))
+                try:
+                    _d = json.loads(out)
+                    _b = _d.get("summary_brief") if isinstance(_d, dict) else None
+                    if _b:
+                        console.print(_b)
+                    else:
+                        console.print(_bubble(f"pal · {_mode}", out[:4000], role="tools", color="cyan"))
+                except Exception:
+                    console.print(_bubble(f"pal · {_mode}", out[:4000], role="tools", color="cyan"))
             continue
 
         # /ask, /cheap, /smart -> a PLAIN chat answer (no tools) for one message

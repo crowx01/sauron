@@ -1105,7 +1105,7 @@ async def run_mission(
                 )
                 res = await run_panel(goal, pmodels, pjudge, full)
                 res["assessment"] = assessment
-                return res
+                return format_mission_summary(res)
 
     used: set[str] = set()
     writer = writer or _pick(_writer_pool(mtype))
@@ -1128,9 +1128,9 @@ async def run_mission(
         else:
             ok = "__ERROR__" not in (answer or "")
             missing = []
-        return {"status": "COMPLETE" if ok else "INCOMPLETE", "mode": "single", "model": solo,
+        return format_mission_summary({"status": "COMPLETE" if ok else "INCOMPLETE", "mode": "single", "model": solo,
                 "assessment": assessment, "team_size": 1, "artifacts": artifacts,
-                "missing": missing, "answer": (answer or "")[:600]}
+                "missing": missing, "answer": (answer or "")[:600]})
 
     judge = judge or _pick_distinct(_env_models("PAL_MISSION_REVIEWER_MODELS", [writer or "qwen3"]), used) or writer
     used.add(judge)
@@ -1199,24 +1199,33 @@ async def run_mission(
                            "reviewers": reviewer_models, "judge": judge, "plan": plan,
                            "exec": report, "reviews": review_notes, "verdict": verdict})
         if str(verdict.get("decision", "")).upper() == "COMPLETE":
-            return {"status": "COMPLETE", "mode": "team", "iterations": iteration,
-                    "assessment": assessment, "team_size": 3 + len(reviewer_models),
-                    "writer": writer, "executor": executor, "reviewers": reviewer_models,
-                    "judge": judge, "transcript": transcript}
+            return format_mission_summary({
+                "status": "COMPLETE", "mode": "team", "iterations": iteration, "max_iters": max_iters,
+                "assessment": assessment, "team_size": 3 + len(reviewer_models),
+                "writer": writer, "executor": executor, "reviewers": reviewer_models,
+                "judge": judge, "transcript": transcript,
+            })
         if no_progress_limit and repeated_fingerprint_count >= no_progress_limit:
             reason = (
                 f"no forward progress for {repeated_fingerprint_count} consecutive iterations; "
                 "the executor evidence and failing checks repeated"
             )
             log.warning("mission: %s", reason)
-            return {
-                "status": "INCOMPLETE", "mode": "team", "iterations": iteration,
+            return format_mission_summary({
+                "status": "INCOMPLETE", "mode": "team", "iterations": iteration, "max_iters": max_iters,
                 "assessment": assessment, "team_size": 3 + len(reviewer_models),
                 "writer": writer, "executor": executor, "reviewers": reviewer_models,
                 "judge": judge, "transcript": transcript,
                 "no_progress": True, "no_progress_reason": reason,
-            }
+            })
         feedback = verdict.get("feedback", "")
+
+    return format_mission_summary({
+        "status": "INCOMPLETE", "mode": "team", "iterations": max_iters, "max_iters": max_iters,
+        "assessment": assessment, "team_size": 3 + len(reviewer_models),
+        "writer": writer, "executor": executor, "reviewers": reviewer_models,
+        "judge": judge, "transcript": transcript,
+    })
 
 def format_mission_summary(result: dict) -> dict:
     """Formats a concise completion brief summarizing objective, accomplishments,
