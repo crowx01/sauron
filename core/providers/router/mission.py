@@ -770,103 +770,137 @@ async def _panel_models(mtype: str, cap: int) -> list[str]:
     return picked[:cap]
 
 
-async def run_panel(goal, models, judge, full):
+async def run_panel(goal: str, models: list[str], judge: str, full: bool, max_iters: int = 10) -> dict:
     """Fan a mission out across MANY models in parallel (8-10): decompose into
-    independent subtasks, run each on a distinct model concurrently, then judge."""
-    from providers.router import dispatch
+    independent subtasks, run each on a distinct model concurrently, then judge.
+    Iterates up to max_iters with feedback if initial attempt is incomplete."""
+    from providers.router import dispatch, size_guard as _sg
 
     criteria = f"The mission is accomplished and verified on disk: {goal}"
-    # decompose is guarded: a dead model here must not crash the whole mission.
-    try:
-        dec = await asyncio.to_thread(
-            dispatch.generate, models[0],
+    feedback = ""
+    no_progress_limit = _no_progress_limit()
+    previous_fingerprint = None
+    repeated_fingerprint_count = 0
+    all_transcript = []
+
+    for iteration in range(1, max_iters + 1):
+        repo_ctx = _repo_context(goal)
+        dec_prompt = (
             f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
-            f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
-            "You are a terse mission decomposer.", temperature=0.2,
-            category="mission", tool="mission", max_output_tokens=500,
+            f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}'
         )
-        subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("mission: decompose failed (%s) → single subtask", str(exc)[:120])
-        subs = [goal]
-    subs = subs[: len(models)] or [goal]
-    repo_ctx = _repo_context(goal)
+        if feedback:
+            dec_prompt += f"\nPREVIOUS ATTEMPT FEEDBACK TO FIX: {feedback}"
 
-    async def _do(i, sub):
-        m = models[i % len(models)]
         try:
-            wr = await asyncio.to_thread(
-                dispatch.generate, m,
-                f"REPO CONTEXT:\n{repo_ctx}\n\nSUBTASK: {sub}\nMISSION: {goal}",
-                _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
-                max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+            dec = await asyncio.to_thread(
+                dispatch.generate, models[0],
+                dec_prompt,
+                "You are a terse mission decomposer.", temperature=0.2,
+                category="mission", tool="mission", max_output_tokens=500,
             )
-            plan = _extract_json(getattr(wr, "content", "") or "") or {}
-            rep = await _execute_plan(plan, m, full, goal=goal)
-            return {"subtask": sub, "model": m, "exec": rep}
-        except Exception as exc:
-            return {"subtask": sub, "model": m, "error": str(exc)[:120]}
+            subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mission: decompose failed (%s) → single subtask", str(exc)[:120])
+            subs = [goal]
+        subs = subs[: len(models)] or [goal]
 
-    results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
+        async def _do(i, sub):
+            m = models[i % len(models)]
+            try:
+                sub_prompt = f"REPO CONTEXT:\n{repo_ctx}\n\nSUBTASK: {sub}\nMISSION: {goal}"
+                if feedback:
+                    sub_prompt += f"\nFEEDBACK FROM PREVIOUS ATTEMPT: {feedback}"
+                wr = await asyncio.to_thread(
+                    dispatch.generate, m,
+                    sub_prompt,
+                    _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
+                    max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+                )
+                plan = _extract_json(getattr(wr, "content", "") or "") or {}
+                rep = await _execute_plan(plan, m, full, goal=goal)
+                return {"subtask": sub, "model": m, "exec": rep}
+            except Exception as exc:
+                return {"subtask": sub, "model": m, "error": str(exc)[:120]}
 
-    # SYNTHESIS (M5): a strong reasoning model merges every sub-result into one
-    # unified output — the "many models as a whole one model" step. Prefer the
-    # BIGGEST-context available model so the merge prompt doesn't trip a small
-    # per-minute token cap (groq gpt-oss 8k TPM rate-limited the synth, 2026-10-08).
-    from providers.router import size_guard as _sg
+        results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
 
-    synth = _pick(sorted(_rank_for_role("synth", models), key=lambda m: -_sg.cap_for(m))) or models[0]
-    synthesis = ""
-    try:
-        sr = await asyncio.to_thread(
-            dispatch.generate, synth,
-            f"MISSION: {goal}\nPER-SUBTASK RESULTS (each by a different model):\n"
-            f"{json.dumps(results)[:6000]}\n\nMerge into ONE unified result.",
-            _SYNTH_SYS, temperature=0.2, category="mission", tool="mission",
-            max_output_tokens=int(os.getenv("PAL_MISSION_SYNTH_TOKENS", "2000")),
-        )
-        synthesis = (getattr(sr, "content", "") or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
+        synth = _pick(sorted(_rank_for_role("synth", models), key=lambda m: -_sg.cap_for(m))) or models[0]
+        synthesis = ""
+        try:
+            sr = await asyncio.to_thread(
+                dispatch.generate, synth,
+                f"MISSION: {goal}\nPER-SUBTASK RESULTS (each by a different model):\n"
+                f"{json.dumps(results)[:6000]}\n\nMerge into ONE unified result.",
+                _SYNTH_SYS, temperature=0.2, category="mission", tool="mission",
+                max_output_tokens=int(os.getenv("PAL_MISSION_SYNTH_TOKENS", "2000")),
+            )
+            synthesis = (getattr(sr, "content", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            synthesis = f"__SYNTH_ERROR__ {str(exc)[:120]}"
 
-    merged = {
-        "files_written": [], "edits_applied": [], "results": [], "verify": [],
-        "code_checks": [], "symbol_checks": [], "changes": [],
-    }
-    for r in results:
-        rep = r.get("exec") or {}
-        for k in merged:
-            merged[k].extend(rep.get(k, []) or [])
-    no_progress_reason = _panel_no_progress_reason(results, _no_progress_limit())
-    # judge is guarded: if the judge model is down, decide from deterministic
-    # evidence so a mission whose verify already passed still COMPLETEs.
-    try:
-        jr = await asyncio.to_thread(
-            dispatch.generate, judge,
-            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
-            f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
-            _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
-        )
-        verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
-    except Exception as exc:  # noqa: BLE001
-        log.warning("mission: judge failed (%s) → deterministic verdict", str(exc)[:120])
-        verdict = _gate_verdict(goal, merged)
-    verdict = _apply_gate(goal, merged, verdict)  # deterministic override across the panel
-    if no_progress_reason:
-        verdict = {
-            "decision": "CONTINUE",
-            "reason": "panel no-progress guard",
-            "feedback": no_progress_reason,
-            "no_progress": True,
+        merged = {
+            "files_written": [], "edits_applied": [], "results": [], "verify": [],
+            "code_checks": [], "symbol_checks": [], "changes": [],
         }
+        for r in results:
+            rep = r.get("exec") or {}
+            for k in merged:
+                merged[k].extend(rep.get(k, []) or [])
+        no_progress_reason = _panel_no_progress_reason(results, no_progress_limit)
+
+        try:
+            jr = await asyncio.to_thread(
+                dispatch.generate, judge,
+                f"MISSION: {goal}\nACCEPTANCE: {criteria}\nSYNTHESIS: {synthesis[:2000]}\n"
+                f"PANEL_RESULTS: {json.dumps(results)[:3500]}",
+                _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
+            )
+            verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mission: judge failed (%s) → deterministic verdict", str(exc)[:120])
+            verdict = _gate_verdict(goal, merged)
+        verdict = _apply_gate(goal, merged, verdict)
+
+        fingerprint = _progress_fingerprint(merged)
+        if fingerprint == previous_fingerprint:
+            repeated_fingerprint_count += 1
+        else:
+            repeated_fingerprint_count = 1
+        previous_fingerprint = fingerprint
+
+        all_transcript.append({
+            "iteration": iteration, "results": results, "verdict": verdict, "synthesis": synthesis
+        })
+
+        if str(verdict.get("decision", "")).upper() == "COMPLETE":
+            contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
+            return {
+                "status": "COMPLETE", "mode": "panel", "iterations": iteration, "max_iters": max_iters,
+                "team_size": len(models), "models": models, "subtasks": subs, "results": results,
+                "judge": judge, "verdict": verdict, "synthesizer": synth, "synthesis": synthesis,
+                "contributors": contributors, "no_progress": False, "transcript": all_transcript,
+            }
+
+        if no_progress_reason or (no_progress_limit and repeated_fingerprint_count >= no_progress_limit):
+            reason = no_progress_reason or f"no forward progress for {repeated_fingerprint_count} consecutive iterations"
+            contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
+            return {
+                "status": "INCOMPLETE", "mode": "panel", "iterations": iteration, "max_iters": max_iters,
+                "team_size": len(models), "models": models, "subtasks": subs, "results": results,
+                "judge": judge, "verdict": verdict, "synthesizer": synth, "synthesis": synthesis,
+                "contributors": contributors, "no_progress": True, "no_progress_reason": reason,
+                "transcript": all_transcript,
+            }
+
+        feedback = (verdict.get("feedback", "") or "").strip() or "Previous attempt did not fully satisfy verification criteria."
+
     contributors = sorted({r.get("model") for r in results if r.get("model")} | {synth})
     return {
-        "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
-        "mode": "panel", "team_size": len(models), "models": models,
-        "subtasks": subs, "results": results, "judge": judge, "verdict": verdict,
-        "synthesizer": synth, "synthesis": synthesis, "contributors": contributors,
-        "no_progress": bool(no_progress_reason),
-        **({"no_progress_reason": no_progress_reason} if no_progress_reason else {}),
+        "status": "INCOMPLETE", "mode": "panel", "iterations": max_iters, "max_iters": max_iters,
+        "team_size": len(models), "models": models, "subtasks": subs, "results": results,
+        "judge": judge, "verdict": verdict, "synthesizer": synth, "synthesis": synthesis,
+        "contributors": contributors, "no_progress": False, "transcript": all_transcript,
     }
 
 
@@ -937,10 +971,22 @@ async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -
             except Exception as exc:
                 report["edits_failed"].append({"path": path, "reason": str(exc)[:120]})
     for cmd in plan.get("commands", []) or []:
-        answer, _tr = await chat_repl._tools_loop(
-            f"Run this exact bash command and report its output: {cmd}",
-            executor, os.getcwd(), max_steps=3, full=full,
-        )
+        if not isinstance(cmd, str) or not cmd.strip():
+            continue
+        if full:
+            try:
+                pr = subprocess.run(
+                    ["bash", "-c", cmd], capture_output=True, text=True,
+                    timeout=120, cwd=os.getcwd(),
+                )
+                answer = (pr.stdout + pr.stderr)[:1000]
+            except Exception:
+                answer, _tr = await chat_repl._tools_loop(
+                    f"Run this exact bash command and report its output: {cmd}",
+                    executor, os.getcwd(), max_steps=3, full=full,
+                )
+        else:
+            answer = "read-only mode: command skipped"
         report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
     # VERIFY: machine-run read-only checks whose EXIT CODE is the proof. Run with
     # subprocess so the result is deterministic (not an LLM's claim about it).
@@ -1107,7 +1153,7 @@ async def run_mission(
                     or _pick(_rank_for_role("reviewer", _all_available_models()))
                     or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
                 )
-                res = await run_panel(goal, pmodels, pjudge, full)
+                res = await run_panel(goal, pmodels, pjudge, full, max_iters=max_iters)
                 res["assessment"] = assessment
                 return format_mission_summary(res)
 
@@ -1313,4 +1359,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"writer={res.get('writer')} executor={res.get('executor')} "
                   f"reviewers={res.get('reviewers')} judge={res.get('judge')}")
+        brief = res.get("summary_brief")
+        if brief:
+            print(f"\n{brief}")
     return 0 if res["status"] == "COMPLETE" else 1

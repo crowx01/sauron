@@ -342,7 +342,7 @@ def test_ensemble_default_runs_panel(monkeypatch):
     async def fake_panel_models(mtype, cap):
         return ["m1", "m2", "m3"]
 
-    async def fake_run_panel(goal, models, judge, full):
+    async def fake_run_panel(goal, models, judge, full, **kwargs):
         return {"status": "COMPLETE", "mode": "panel", "models": models, "contributors": models}
 
     monkeypatch.setattr(mission, "_panel_models", fake_panel_models)

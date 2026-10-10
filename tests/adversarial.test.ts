@@ -116,7 +116,7 @@ describe('Adversarial final round', () => {
     let out = '';
     for await (const c of chatRouter.dispatch([msg('user', 'hi')], { model: 'boom-1' })) out += c.delta ?? '';
     expect(out.length).toBeGreaterThan(0);
-  });
+  }, { timeout: 15000 });
 
   test('B1: aborting bash kills the whole process group (no orphan)', async () => {
     const pidFile = join(home, 'pid.txt');

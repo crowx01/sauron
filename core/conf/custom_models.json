@@ -117,6 +117,20 @@
       "supports_temperature": true,
       "description": "Groq / Qwen 3.8 27B - 128K context, strong for code",
       "intelligence_score": 12
+    },
+    {
+      "model_name": "local-llama",
+      "aliases": ["llama", "ollama", "llama3.2"],
+      "context_window": 131072,
+      "max_output_tokens": 16384,
+      "supports_extended_thinking": false,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "Local Llama model via Ollama / OpenAI-compatible endpoint",
+      "intelligence_score": 10
     }
   ]
 }

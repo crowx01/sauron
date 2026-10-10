@@ -1688,6 +1688,8 @@ class _BoxedPrompt:
 
         @kb.add("enter")
         def _submit(event):
+            if ta.text.strip():
+                ta.buffer.append_to_history()
             res["text"] = ta.text
             event.app.exit()
 
@@ -1813,7 +1815,7 @@ class _FullScreenUI:
     write lands in the scrolling transcript (see :class:`_CaptureConsole`)."""
 
     def __init__(self, header_cb, state, footer_cb, content_width: int = 80,
-                 _input=None, _output=None):
+                 _input=None, _output=None, history=None):
         from prompt_toolkit.application import Application
         from prompt_toolkit.filters import Condition, to_filter
         from prompt_toolkit.key_binding import KeyBindings
@@ -1824,6 +1826,7 @@ class _FullScreenUI:
         from prompt_toolkit.widgets import Frame, TextArea
 
         self.state = state
+        self.history = history
         self.content_width = content_width
         self._lines: list[str] = []     # completed transcript lines (ANSI)
         self._pending = ""              # current partial line (streaming)
@@ -1842,6 +1845,7 @@ class _FullScreenUI:
         self.ta = TextArea(
             multiline=True, prompt="> ", wrap_lines=True,
             height=D(min=1), scrollbar=False,
+            history=self.history,
             completer=_ChatCompleter() if _PT_OK else None,
             complete_while_typing=True,
         )
@@ -1893,6 +1897,8 @@ class _FullScreenUI:
         @kb.add("enter", filter=_normal_filter)
         def _(e):
             txt = self.ta.text
+            if txt.strip():
+                self.ta.buffer.append_to_history()
             self.ta.text = ""
             self._scroll = 0  # jump back to the bottom on a new turn
             if txt.strip() and getattr(self.state, "busy", False):
@@ -1919,19 +1925,31 @@ class _FullScreenUI:
             self._clamp_scroll()
             e.app.invalidate()
 
-        # Mouse wheel (via alternate-scroll → arrow keys) scrolls the transcript
-        # when you're not editing, so native copy keeps working. With text in
-        # the box, Up/Down fall through to normal cursor/history navigation.
-        _idle = Condition(lambda: not self._picker_open and not self.ta.text.strip())
+        @kb.add("up", filter=_normal_filter)
+        def _hist_prev(e):
+            buff = self.ta.buffer
+            if not buff.text or buff.cursor_position_row == 0:
+                buff.history_backward()
+            else:
+                buff.cursor_up()
 
-        @kb.add("up", filter=_idle)
-        def _(e):
+        @kb.add("down", filter=_normal_filter)
+        @kb.add("c-n", filter=_normal_filter)
+        def _hist_next(e):
+            buff = self.ta.buffer
+            if not buff.text or buff.cursor_position_row == len(buff.lines) - 1:
+                buff.history_forward()
+            else:
+                buff.cursor_down()
+
+        @kb.add("s-up", filter=_normal_filter)
+        def _scroll_up(e):
             self._scroll += 3
             self._clamp_scroll()
             e.app.invalidate()
 
-        @kb.add("down", filter=_idle)
-        def _(e):
+        @kb.add("s-down", filter=_normal_filter)
+        def _scroll_down(e):
             self._scroll -= 3
             self._clamp_scroll()
             e.app.invalidate()
@@ -2153,7 +2171,11 @@ class _FullScreenUI:
             self.app.invalidate()
 
     def flush(self) -> None:
-        pass
+        if self._pending:
+            self._lines.append(self._pending)
+            self._pending = ""
+            if self.app.is_running:
+                self.app.invalidate()
 
     def isatty(self) -> bool:
         return False
@@ -2785,39 +2807,32 @@ async def _watch_and_retry(pid, res_path, goal, plan_text, model, ptype,
     try:
         await _await_pid(pid)
         data = _read_results(res_path)
+        brief = data.get("summary_brief") if isinstance(data, dict) else None
+        if not brief and isinstance(data, dict):
+            from providers.router.mission import format_mission_summary
+            brief = format_mission_summary(data).get("summary_brief")
+
         if _plan_status(data) == "success":
             _note(f"✓ plan succeeded on attempt {attempt} — {res_path}", "sys")
-            if isinstance(data, dict):
-                brief = data.get("summary_brief")
-                if not brief:
-                    from providers.router.mission import format_mission_summary
-                    brief = format_mission_summary(data).get("summary_brief")
-                if brief:
-                    console.print(brief)
+            if brief:
+                console.print(brief)
+                if hasattr(console, "file") and hasattr(console.file, "flush"):
+                    console.file.flush()
             return
         reason = _plan_failure_reason(data, res_path)
         _note(f"⚠ plan attempt {attempt} failed: {reason[:200]}", "sys")
+        if brief:
+            console.print(brief)
+            if hasattr(console, "file") and hasattr(console.file, "flush"):
+                console.file.flush()
+
         if attempt >= max_attempts:
             _note(f"✗ gave up after {attempt} attempts — inspect {res_path}", "err")
-            if isinstance(data, dict):
-                brief = data.get("summary_brief")
-                if not brief:
-                    from providers.router.mission import format_mission_summary
-                    brief = format_mission_summary(data).get("summary_brief")
-                if brief:
-                    console.print(brief)
             return
         _note(f"↻ troubleshooting + retrying (attempt {attempt + 1}/{max_attempts})…", "sys")
         new_plan = await _troubleshoot_plan(goal, plan_text, reason, model, ptype)
         if not new_plan:
             _note("✗ troubleshooting produced no revised plan — stopping", "err")
-            if isinstance(data, dict):
-                brief = data.get("summary_brief")
-                if not brief:
-                    from providers.router.mission import format_mission_summary
-                    brief = format_mission_summary(data).get("summary_brief")
-                if brief:
-                    console.print(brief)
             return
         _pp, rp, newpid, _mode = _launch_plan_background(goal, new_plan, model, ptype)
         _note(f"↳ revised plan running in background (pid {newpid}) → {rp}", "sys")
@@ -2944,7 +2959,7 @@ async def _run(handle):
 
     if _fullscreen:
         try:
-            ui = _FullScreenUI(_fs_header, state, _fs_footer, content_width=content_w)
+            ui = _FullScreenUI(_fs_header, state, _fs_footer, content_width=content_w, history=chat_history.JsonlSessionHistory(session_id))
             globals()["_FULLSCREEN_ACTIVE"] = True
             globals()["_FS_UI"] = ui
             console = _CaptureConsole(ui, width=content_w)
@@ -3414,8 +3429,11 @@ async def _run(handle):
                 console.print("[dim]↳ executing via PAL (orchestrated) …[/]")
                 _mode, _cmd, _out = await _run_plan_through_pal(goal, ans, exec_model, ptype)
                 try:
-                    _d = json.loads(_out)
+                    from providers.router.mission import _extract_json, format_mission_summary
+                    _d = _extract_json(_out) or json.loads(_out)
                     _b = _d.get("summary_brief") if isinstance(_d, dict) else None
+                    if not _b and isinstance(_d, dict):
+                        _b = format_mission_summary(_d).get("summary_brief")
                     if _b:
                         console.print(_b)
                     else:
@@ -3446,8 +3464,11 @@ async def _run(handle):
                 console.print("[dim]→ executing via PAL (orchestrated)…[/]")
                 _mode, _cmd, out = await _run_plan_through_pal(None, plan_text, selected_model)
                 try:
-                    _d = json.loads(out)
+                    from providers.router.mission import _extract_json, format_mission_summary
+                    _d = _extract_json(out) or json.loads(out)
                     _b = _d.get("summary_brief") if isinstance(_d, dict) else None
+                    if not _b and isinstance(_d, dict):
+                        _b = format_mission_summary(_d).get("summary_brief")
                     if _b:
                         console.print(_b)
                     else:

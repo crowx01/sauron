@@ -41,7 +41,7 @@ def _no_sizeguard_no_caveman(monkeypatch):
     from providers.router import caveman, size_guard
 
     monkeypatch.setattr(caveman, "is_enabled", lambda: False)
-    monkeypatch.setattr(size_guard, "check_or_reroute", lambda m, p: (True, ""))
+    monkeypatch.setattr(size_guard, "check_or_reroute", lambda m, p, **kw: (True, ""))
     # silence episode/refusal recording side effects
     from providers.router import episode_store, refusal_memory
 

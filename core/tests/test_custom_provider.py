@@ -215,7 +215,7 @@ class TestCustomProviderRegistration:
             custom_provider = custom_provider_factory()
             openrouter_provider = OpenRouterProvider(api_key="test-openrouter-key")
 
-            assert not custom_provider.validate_model_name("llama")
+            assert not custom_provider.validate_model_name("nonexistent-custom-model-xyz")
             assert openrouter_provider.validate_model_name("llama")
 
 
