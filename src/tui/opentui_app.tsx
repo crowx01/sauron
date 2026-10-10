@@ -10,6 +10,8 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 export function OpenTUIApp() {
   const dimensions = useTerminalDimensions();
   const [prompt, setPrompt] = createSignal('');
+  const [cursorPos, setCursorPos] = createSignal(0);
+  const [scrollOffset, setScrollOffset] = createSignal(0);
   const [promptQueue, setPromptQueue] = createSignal<string[]>([]);
   const [isBusy, setIsBusy] = createSignal(false);
   const [spinnerIdx, setSpinnerIdx] = createSignal(0);
@@ -50,7 +52,7 @@ export function OpenTUIApp() {
     setActiveModal('none');
   };
 
-  // Keyboard router: Full typing, shortcuts, modal navigation & slash command palette
+  // Keyboard router: Full typing, shortcuts, cursor navigation & mouse wheel scroll
   useKeyboard((key) => {
     if (key.ctrl && key.name === 'c') {
       process.exit(0);
@@ -69,6 +71,17 @@ export function OpenTUIApp() {
     }
     if (key.ctrl && key.name === 'b') {
       setSidebarPref(!sidebarPref());
+      return;
+    }
+
+    // Transcript Mouse Wheel Scroll & PageUp / PageDown
+    const raw = key.raw || key.sequence || '';
+    if (key.name === 'pageup' || raw.includes('<64;') || raw.startsWith('\x1b[<64')) {
+      setScrollOffset((s) => s + 3);
+      return;
+    }
+    if (key.name === 'pagedown' || raw.includes('<65;') || raw.startsWith('\x1b[<65')) {
+      setScrollOffset((s) => Math.max(0, s - 3));
       return;
     }
 
@@ -111,10 +124,32 @@ export function OpenTUIApp() {
       return;
     }
 
-    // Normal Input Handling
+    // Normal Input Handling & Prompt Navigation
     if (key.name === 'escape') {
       setPrompt('');
+      setCursorPos(0);
       if (promptQueue().length > 0) setPromptQueue([]);
+      return;
+    }
+
+    if (key.name === 'left') {
+      setCursorPos((c) => Math.max(0, c - 1));
+      return;
+    }
+
+    if (key.name === 'right') {
+      setCursorPos((c) => Math.min(prompt().length, c + 1));
+      return;
+    }
+
+    if (key.name === 'home') {
+      setCursorPos(0);
+      return;
+    }
+
+    if (key.name === 'end') {
+      setCursorPos(prompt().length);
+      setScrollOffset(0);
       return;
     }
 
@@ -124,12 +159,17 @@ export function OpenTUIApp() {
     }
 
     if (key.name === 'backspace') {
-      setPrompt((p) => p.slice(0, -1));
+      const c = cursorPos();
+      if (c > 0) {
+        setPrompt((p) => p.slice(0, c - 1) + p.slice(c));
+        setCursorPos((prev) => Math.max(0, prev - 1));
+      }
       return;
     }
 
-    if (key.name === 'space') {
-      setPrompt((p) => p + ' ');
+    if (key.name === 'delete') {
+      const c = cursorPos();
+      setPrompt((p) => p.slice(0, c) + p.slice(c + 1));
       return;
     }
 
@@ -137,7 +177,9 @@ export function OpenTUIApp() {
     if (!key.ctrl && !key.meta) {
       const char = key.sequence || (key.name && key.name.length === 1 ? key.name : null);
       if (char && char.length === 1 && char >= ' ' && char <= '~') {
-        setPrompt((p) => p + char);
+        const c = cursorPos();
+        setPrompt((p) => p.slice(0, c) + char + p.slice(c));
+        setCursorPos((prev) => prev + 1);
       }
     }
   });
@@ -148,6 +190,8 @@ export function OpenTUIApp() {
     if (!text) return;
 
     setPrompt('');
+    setCursorPos(0);
+    setScrollOffset(0);
 
     // Slash Commands Execution (/model, /theme, /sessions, /palette, /help, /clear, /compact, /quit)
     if (text.startsWith('/')) {
@@ -244,6 +288,19 @@ export function OpenTUIApp() {
     }
   };
 
+  const renderedPromptWithCursor = () => {
+    const p = prompt();
+    const c = Math.max(0, Math.min(p.length, cursorPos()));
+    return p.slice(0, c) + '█' + p.slice(c);
+  };
+
+  const visibleMessages = () => {
+    const msgs = messages();
+    if (scrollOffset() === 0) return msgs;
+    const end = Math.max(1, msgs.length - scrollOffset());
+    return msgs.slice(0, end);
+  };
+
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor="#0f172a">
       {/* Top Header Tab Bar */}
@@ -271,7 +328,10 @@ export function OpenTUIApp() {
 
         {/* Flexible Scrollbox Transcript Pane */}
         <scrollbox flexGrow={1} height="100%" borderStyle="single" borderColor="#334155" padding={1}>
-          <For each={messages()}>
+          <Show when={scrollOffset() > 0}>
+            <text color="#facc15" bold> ▲ SCROLLED UP ({scrollOffset()} msgs) - Press End or type to return to bottom </text>
+          </Show>
+          <For each={visibleMessages()}>
             {(msg) => (
               <box flexDirection="column" marginBottom={1}>
                 <text color={msg.role === 'user' ? '#38bdf8' : msg.role === 'assistant' ? '#a855f7' : '#64748b'} bold>
@@ -300,7 +360,7 @@ export function OpenTUIApp() {
       <box flexDirection="column" width="100%" height={4} borderStyle="single" borderColor="#38bdf8">
         <box flexDirection="row" width="100%">
           <text color="#38bdf8" bold> PROMPT &gt; </text>
-          <text color="#e2e8f0">{prompt()}█</text>
+          <text color="#e2e8f0">{renderedPromptWithCursor()}</text>
         </box>
         <box flexDirection="row" width="100%" backgroundColor="#1e293b">
           <text color={isBusy() ? '#facc15' : '#4ade80'}>
