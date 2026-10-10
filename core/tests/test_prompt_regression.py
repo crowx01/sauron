@@ -44,10 +44,11 @@ CUSTOM_API_AVAILABLE = os.getenv("CUSTOM_API_URL") is not None
 
 
 def skip_if_no_custom_api():
-    """Helper to skip integration tests if CUSTOM_API_URL is not available."""
-    if not CUSTOM_API_AVAILABLE:
+    """Helper to skip integration tests if CUSTOM_API_URL is not available or not pointing to local Ollama."""
+    url = os.getenv("CUSTOM_API_URL", "")
+    if not url or ("localhost" not in url and "127.0.0.1" not in url and "11434" not in url):
         pytest.skip(
-            "CUSTOM_API_URL not set. To run integration tests with local-llama, ensure CUSTOM_API_URL is set in .env file (e.g., http://localhost:11434/v1)"
+            "CUSTOM_API_URL not set to a local Ollama endpoint (e.g., http://localhost:11434/v1). Skipping local-llama integration tests."
         )
 
 

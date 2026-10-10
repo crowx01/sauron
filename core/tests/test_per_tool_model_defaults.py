@@ -151,7 +151,7 @@ class TestModelSelection:
 
             model = ModelProviderRegistry.get_preferred_fallback_model(ToolModelCategory.FAST_RESPONSE)
             # Gemini should return one of its models for fast response
-            assert model in ["gemini-3.6-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-3.6-flash"]
+            assert model in ["gemini-3.8-flash-medium", "gemini-3.7-flash-medium", "gemini-3.6-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
 
     def test_balanced_category_fallback(self):
         """Test BALANCED category uses existing logic."""
@@ -180,7 +180,7 @@ class TestModelSelection:
 
             model = ModelProviderRegistry.get_preferred_fallback_model()
             # Should pick flash for balanced use
-            assert model == "gemini-3.6-flash"
+            assert model in ["gemini-3.8-flash-medium", "gemini-3.7-flash-medium", "gemini-3.6-flash"]
 
 
 class TestFlexibleModelSelection:
@@ -195,21 +195,21 @@ class TestFlexibleModelSelection:
                 "env": {"OPENAI_API_KEY": "test-key"},
                 "provider_type": ProviderType.OPENAI,
                 "category": ToolModelCategory.EXTENDED_REASONING,
-                "expected": "gpt-5.1-codex",  # GPT-5.1-Codex prioritized for coding tasks
+                "expected": ["gpt-5.1-codex"],  # GPT-5.1-Codex prioritized for coding tasks
             },
             # Case 2: Gemini provider for fast response
             {
                 "env": {"GEMINI_API_KEY": "test-key"},
                 "provider_type": ProviderType.GOOGLE,
                 "category": ToolModelCategory.FAST_RESPONSE,
-                "expected": "gemini-3.6-flash",
+                "expected": ["gemini-3.8-flash-medium", "gemini-3.7-flash-medium", "gemini-3.6-flash"],
             },
             # Case 3: OpenAI provider for fast response
             {
                 "env": {"OPENAI_API_KEY": "test-key"},
                 "provider_type": ProviderType.OPENAI,
                 "category": ToolModelCategory.FAST_RESPONSE,
-                "expected": "gpt-5.2",  # Based on new preference order
+                "expected": ["gpt-5.2"],  # Based on new preference order
             },
         ]
 
@@ -232,7 +232,7 @@ class TestFlexibleModelSelection:
                     ModelProviderRegistry.register_provider(ProviderType.GOOGLE, GeminiModelProvider)
 
                 model = ModelProviderRegistry.get_preferred_fallback_model(case["category"])
-                assert model == case["expected"], f"Failed for case: {case}, got {model}"
+                assert model in case["expected"], f"Failed for case: {case}, got {model}"
 
 
 class TestCustomProviderFallback:

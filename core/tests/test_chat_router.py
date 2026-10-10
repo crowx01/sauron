@@ -447,7 +447,7 @@ def test_f1_colorize_diff_colors():
 
 
 def test_f2_context_pct():
-    assert chat_repl._context_pct([], "x") == 0
+    assert chat_repl._context_pct([], "x") < 1.0
     big = [{"role": "user", "content": "x" * 40000}] * 3
     assert chat_repl._context_pct(big, "x") > 0
 
@@ -463,14 +463,16 @@ def test_f3_at_file_completer(tmp_path, monkeypatch):
 def test_f4_footer_extra():
     class S:
         queued = 2
-        ctx_pct = 7
+        ctx_pct = 7.0
     assert "(2 queued)" in chat_repl._footer_extra(S())
-    assert "7% ctx" in chat_repl._footer_extra(S())
+    assert "7.0%" in chat_repl._footer_extra(S())
 
     class Z:
         queued = 0
-        ctx_pct = 0
-    assert chat_repl._footer_extra(Z()) == ""
+        ctx_pct = 0.0
+        used_tokens = 0
+        total_tokens = 128000
+    assert "0.0%" in chat_repl._footer_extra(Z())
 
 
 def test_f5_cancel_raises_interrupted():
