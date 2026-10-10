@@ -1010,6 +1010,10 @@ def _deterministic_gate(goal: str, report: dict) -> tuple[str | None, str]:
     block. Goal-text artifact matching is only a FALLBACK for missions with no
     verify, because it greedily matches INPUT source paths named in the goal and
     would otherwise false-veto a genuinely complete mission (2026-10-08)."""
+    edits_failed = report.get("edits_failed", []) or []
+    if edits_failed:
+        details = [f"{x.get('path')}: {x.get('reason')}" for x in edits_failed[:4]]
+        return "CONTINUE", f"edit failure(s): {details}"
     code_failures = [x for x in report.get("code_checks", []) or [] if not x.get("ok")]
     if code_failures:
         details = [x.get("message", "code validation failed") for x in code_failures[:4]]
