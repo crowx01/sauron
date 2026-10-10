@@ -57,7 +57,7 @@ export class ModalManager {
     }
 
     if (keyName === 'down') {
-      this.selectedIndex++;
+      this.selectedIndex = Math.min(this.selectedIndex + 1, Math.max(0, this.itemCount() - 1));
       return true;
     }
 
@@ -76,6 +76,17 @@ export class ModalManager {
     return false;
   }
 
+  private itemCount(): number {
+    const q = this.filterQuery.toLowerCase();
+    switch (this.activeModal) {
+      case 'model_picker': return chatRouter.getCatalog().filter((m) => m.model.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q)).length;
+      case 'command_palette': return this.filteredPalette().length;
+      case 'theme_picker': return themeStore.listThemes().filter((th) => th.toLowerCase().includes(q)).length;
+      case 'session_drawer': return sessionStore.listSessions().filter((s) => s.id.toLowerCase().includes(q) || s.title.toLowerCase().includes(q)).length;
+      default: return 0;
+    }
+  }
+
   public render(width: number, height: number): string[] {
     if (this.activeModal === 'none') return [];
 
@@ -89,6 +100,29 @@ export class ModalManager {
       case 'diff_viewer': return this.renderDiffViewer(width, height, t);
       default: return [];
     }
+  }
+
+  private paletteActions(): CommandPaletteItem[] {
+    return [
+      { id: '1', title: 'Switch AI Model', description: 'Open fuzzy model catalog picker', category: 'Model', shortcut: '<leader>m', action: () => this.openModal('model_picker') },
+      { id: '2', title: 'New Conversation Session', description: 'Start a clean chat session', category: 'Session', shortcut: '<leader>n', action: () => { sessionStore.createSession('New Session'); this.closeModal(); } },
+      { id: '3', title: 'Toggle Session Drawer', description: 'Browse and restore saved sessions', category: 'Session', shortcut: '<leader>l', action: () => this.openModal('session_drawer') },
+      { id: '4', title: 'Change Theme', description: 'Switch between 34 bundled color palettes', category: 'UI', shortcut: '<leader>t', action: () => this.openModal('theme_picker') },
+      { id: '5', title: 'Toggle Diff Viewer', description: 'View full-screen split/unified diffs', category: 'Diff', shortcut: '<leader>d', action: () => this.openModal('diff_viewer') },
+      { id: '6', title: 'Compact Context Memory', description: 'Extract facts & save lossless archive', category: 'Session', shortcut: '<leader>c', action: () => { sessionStore.compactContext(); this.closeModal(); } },
+      { id: '7', title: 'Which-Key Keyboard Help', description: 'View all keyboard shortcuts and leader bindings', category: 'Help', shortcut: 'ctrl+alt+k', action: () => this.openModal('which_key') },
+      { id: '8', title: 'Exit Sauron TUI', description: 'Close application cleanly', category: 'System', shortcut: 'ctrl+c', action: () => process.exit(0) }
+    ];
+  }
+
+  private filteredPalette(): CommandPaletteItem[] {
+    const q = this.filterQuery.toLowerCase();
+    return this.paletteActions().filter((a) => a.title.toLowerCase().includes(q) || a.description.toLowerCase().includes(q) || a.category.toLowerCase().includes(q));
+  }
+
+  private scrollStart(visible: number, total: number): number {
+    if (total <= visible) return 0;
+    return Math.min(Math.max(0, this.selectedIndex - visible + 1), total - visible);
   }
 
   // 1. OpenCode Model Selector Dialog (<leader>m)
@@ -122,7 +156,9 @@ export class ModalManager {
     const visibleCount = dialogHeight - 6;
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
 
-    for (let i = 0; i < visibleCount; i++) {
+    const start = this.scrollStart(visibleCount, filtered.length);
+    for (let row = 0; row < visibleCount; row++) {
+      const i = start + row;
       if (i >= filtered.length) {
         lines.push(`│ ${' '.repeat(dialogWidth - 4)} │`);
         continue;
@@ -165,7 +201,9 @@ export class ModalManager {
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
     const visibleCount = drawerHeight - 5;
 
-    for (let i = 0; i < visibleCount; i++) {
+    const start = this.scrollStart(visibleCount, filtered.length);
+    for (let row = 0; row < visibleCount; row++) {
+      const i = start + row;
       if (i >= filtered.length) {
         lines.push(`│ ${' '.repeat(drawerWidth - 4)} │`);
         continue;
@@ -175,7 +213,7 @@ export class ModalManager {
       const isSelected = i === this.selectedIndex;
       const prefix = isSelected ? '● ' : '  ';
       const titleStr = s.title.slice(0, 24).padEnd(24);
-      const msgStr = `${s.messages.length} msgs`;
+      const msgStr = `${s.messageCount} msgs`;
       const timeStr = new Date(s.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       const rowStr = `${prefix}${titleStr} │ ${msgStr.padEnd(8)} │ ${timeStr}`;
@@ -192,16 +230,7 @@ export class ModalManager {
 
   // 3. OpenCode Fuzzy Command Palette (Ctrl+P)
   private renderCommandPalette(width: number, height: number, t: ThemeTokens): string[] {
-    const actions: CommandPaletteItem[] = [
-      { id: '1', title: 'Switch AI Model', description: 'Open fuzzy model catalog picker', category: 'Model', shortcut: '<leader>m', action: () => this.openModal('model_picker') },
-      { id: '2', title: 'New Conversation Session', description: 'Start a clean chat session', category: 'Session', shortcut: '<leader>n', action: () => { sessionStore.createSession('New Session'); this.closeModal(); } },
-      { id: '3', title: 'Toggle Session Drawer', description: 'Browse and restore saved sessions', category: 'Session', shortcut: '<leader>l', action: () => this.openModal('session_drawer') },
-      { id: '4', title: 'Change Theme', description: 'Switch between 34 bundled color palettes', category: 'UI', shortcut: '<leader>t', action: () => this.openModal('theme_picker') },
-      { id: '5', title: 'Toggle Diff Viewer', description: 'View full-screen split/unified diffs', category: 'Diff', shortcut: '<leader>d', action: () => this.openModal('diff_viewer') },
-      { id: '6', title: 'Compact Context Memory', description: 'Extract facts & save lossless archive', category: 'Session', shortcut: '<leader>c', action: () => { sessionStore.compactContext(); this.closeModal(); } },
-      { id: '7', title: 'Which-Key Keyboard Help', description: 'View all keyboard shortcuts and leader bindings', category: 'Help', shortcut: 'ctrl+alt+k', action: () => this.openModal('which_key') },
-      { id: '8', title: 'Exit Sauron TUI', description: 'Close application cleanly', category: 'System', shortcut: 'ctrl+c', action: () => process.exit(0) }
-    ];
+    const actions = this.paletteActions();
 
     const query = this.filterQuery.toLowerCase();
     const filtered = actions.filter((a) => a.title.toLowerCase().includes(query) || a.description.toLowerCase().includes(query) || a.category.toLowerCase().includes(query));
@@ -218,7 +247,9 @@ export class ModalManager {
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
     const visibleCount = pHeight - 5;
 
-    for (let i = 0; i < visibleCount; i++) {
+    const start = this.scrollStart(visibleCount, filtered.length);
+    for (let row = 0; row < visibleCount; row++) {
+      const i = start + row;
       if (i >= filtered.length) {
         lines.push(`│ ${' '.repeat(pWidth - 4)} │`);
         continue;
@@ -259,7 +290,9 @@ export class ModalManager {
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
     const visibleCount = tHeight - 4;
 
-    for (let i = 0; i < visibleCount; i++) {
+    const start = this.scrollStart(visibleCount, filtered.length);
+    for (let row = 0; row < visibleCount; row++) {
+      const i = start + row;
       if (i >= filtered.length) {
         lines.push(`│ ${' '.repeat(tWidth - 4)} │`);
         continue;
@@ -364,8 +397,18 @@ export class ModalManager {
       if (filtered[this.selectedIndex]) {
         const targetModel = filtered[this.selectedIndex].model;
         return () => {
-          (chatRouter as any).defaultModel = targetModel;
+          chatRouter.setDefaultModel(targetModel);
           this.closeModal();
+        };
+      }
+    }
+
+    if (this.activeModal === 'command_palette') {
+      const item = this.filteredPalette()[this.selectedIndex];
+      if (item) {
+        return () => {
+          this.closeModal();
+          item.action();
         };
       }
     }

@@ -9,6 +9,18 @@ export class ChatRouter {
     return this.defaultModel;
   }
 
+  /** Resolve a model name or alias against the catalog; returns the canonical name or null. */
+  public resolveModel(name: string): string | null {
+    const q = name.trim().toLowerCase();
+    const hit = this.catalog.find((m) => m.model.toLowerCase() === q || m.aliases?.some((a) => a.toLowerCase() === q))
+      ?? this.catalog.find((m) => m.model.toLowerCase().includes(q));
+    return hit ? hit.model : null;
+  }
+
+  public setDefaultModel(model: string): void {
+    this.defaultModel = model;
+  }
+
   private catalog: ModelEntry[] = [
 
     { model: 'claude-3-7-sonnet', provider: 'anthropic', intelligence: 98, costRank: 3, routable: true, tools: true, aliases: ['sonnet-3.7', 'claude-3.7'] },
