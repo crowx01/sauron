@@ -1,3 +1,4 @@
+export { OpenTUIApp, startOpenTUI } from './opentui_app';
 export { OpenCodeEngine } from './opencode_engine';
 export { themeStore, BUNDLED_THEMES } from './themes';
 export { keymapRegistry } from './keymaps';
