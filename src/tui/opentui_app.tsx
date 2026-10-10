@@ -221,15 +221,25 @@ export function OpenTUIApp() {
           return;
         case '/session':
         case '/sessions':
-          setActiveModal('session_drawer');
+          if (args[0] === 'clear' || args[0] === 'reset' || args[0] === 'delete' || args[0] === 'all') {
+            sessionStore.clearAllSessions();
+            setMessages([...sessionStore.getActiveSession().messages]);
+          } else {
+            setActiveModal('session_drawer');
+          }
           return;
         case '/help':
         case '/keys':
           setActiveModal('which_key');
           return;
         case '/clear':
-          sessionStore.clearActiveSession();
-          setMessages([]);
+          if (args[0] === 'all' || args[0] === 'sessions') {
+            sessionStore.clearAllSessions();
+            setMessages([...sessionStore.getActiveSession().messages]);
+          } else {
+            sessionStore.clearActiveSession();
+            setMessages([]);
+          }
           return;
         case '/compact':
           sessionStore.compactContext();
