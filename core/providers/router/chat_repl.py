@@ -986,9 +986,12 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
     return last_ans, last_transcript, last_model
 
 
-# ---- Sauron terminal visual language ---------------------------------------
-# Neutral transcript and tool output, one warm brand accent, and red for errors.
-_ACCENT = "#ff8a1c"
+# ---- Sauron Multi-Model Visual Language ------------------------------------
+# High-contrast Sauron palette: Obsidian base, Muted Silver, Crimson accent, Electric Violet & Amber
+_ACCENT = "#ef4444"  # Sauron brand Crimson accent
+_VIOLET = "#a855f7"
+_AMBER = "#f59e0b"
+
 
 
 def _note(msg: str, kind: str = "sys") -> None:
@@ -2189,6 +2192,13 @@ def _header(cheap: str | None, smart: str | None, **ctx) -> Panel:
     return Panel(Group(*rows), border_style=_ACCENT, padding=(0, 1))
 
 
+# Eye-of-Sauron Multi-Node Watchful Eye logo and brand palette
+from utils.sauron_brand import render_sauron_logo, render_sauron_banner
+from utils.shared_memory import get_shared_memory_store
+
+_BRAND = "#ef4444"
+
+
 def _version() -> str:
     """Best-effort sauron version from the nearest package.json (empty if none)."""
     import json
@@ -2205,25 +2215,22 @@ def _version() -> str:
 
 
 def _banner(cheap: str | None, smart: str | None, **ctx):
-    """Small startup identity that leaves most terminal space for the chat."""
+    """Compact, borderless startup banner: the Sauron eye logo on the left with
+    the engine identity stacked to its right, then a feature summary
+    and command hint."""
     model = ctx.get("model") or "auto (routed)"
     cwd = ctx.get("cwd", "")
     home = os.path.expanduser("~")
     cwd_disp = (cwd.replace(home, "~", 1) if cwd.startswith(home) else cwd) if cwd else ""
-    plan_only = ctx.get("plan_only", _claude_plan_only())
-    exec_mode = "engine-only" if plan_only else "claude+engine"
-    ver = _version()
-    command_hint = (
-        "Ctrl+P commands  ·  Shift+Tab mode  ·  /help"
-        if ctx.get("fullscreen") else "Type / for commands  ·  Shift+Tab mode  ·  /help"
-    )
 
-    return Group(
-        Text.assemble(("◉ ", f"bold {_ACCENT}"), ("sauron", f"bold {_ACCENT}"),
-                      (f"  v{ver}" if ver else "", "dim")),
-        Text(f"{cwd_disp}  ·  {model}  ·  {exec_mode}", style="dim"),
-        Text(command_hint, style="dim"),
-    )
+    try:
+        mem_store = get_shared_memory_store()
+        mem_count = len(mem_store.list_memories())
+    except Exception:
+        mem_count = 0
+
+    return render_sauron_banner(model_disp=model, cwd_disp=cwd_disp, memory_count=mem_count)
+
 
 
 def _available_models() -> list[str]:
