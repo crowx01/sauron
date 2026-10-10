@@ -1,0 +1,2 @@
+# SAURON BUN CONFIGURATION FOR OPENTUI & SOLIDJS
+preload = ["@opentui/solid/preload"]

@@ -19,27 +19,16 @@ This log documents all file changes, additions, modifications, and removals perf
 
 | File Path | Status | Purpose / Description |
 | :--- | :--- | :--- |
-| `package.json` | **Modified** | Updated engine settings for Bun (>=1.0.0), ES modules (`"type": "module"`), TS scripts, and devDependencies. |
-| `tsconfig.json` | **Added** | Strict ESNext bundler configuration targeting Bun runtime. |
-| `bin/cli.js` | **Modified** | Updated CLI launcher to dispatch engine subcommands directly into Bun (`src/cli.ts`), completely removing Python dispatches. |
-| `src/types/index.ts` | **Added** | Core domain interfaces (`Message`, `ToolCall`, `ModelEntry`, `RouterOptions`, `StreamChunk`, `Session`, `MissionReport`, `Playbook`, `Resolution`, `DAGPlan`). |
-| `src/config/index.ts` | **Added** | System settings, custom model loading, and environment API key resolution (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, etc.). |
-| `src/providers/index.ts` | **Added** | Async streaming provider adapters for OpenAI, Anthropic, Gemini, OpenRouter, Cohere, xAI, Azure, and Mock provider. |
-| `src/router/index.ts` | **Added** | Intelligence catalog, automatic model routing, fallback chain dispatching, closed-loop bias scoring, and rate limit handling. |
-| `src/router/lessons.ts` | **Added** | Dynamic lesson store with error classification (`classifyError`), rate-limit cooldowns (`isCooledDown`), recency decay, and atomic persistence. |
-| `src/tools/index.ts` | **Added** | ToolBelt execution engine (`bash`, `read_file`, `write_file`, `web_fetch`, `secsuite`) with timeout, child process group cleanup, 1MB output cap, SSRF guards, and ToolResolver auto-mutation. |
-| `src/session/index.ts` | **Added** | Persistent session storage (`~/.sauron/sessions/`), atomic writes, path traversal checks, structured fact context compaction, and JSONL archive sidecars. |
-| `src/mission/index.ts` | **Added** | Hardened 3-phase Writer -> Executor -> Judge mission pipeline with 30/40/30 scoring rubric (Exit status 30, Relevance 40, Completeness 30) and Playbook distillation. |
-| `src/agent/react.ts` | **Added** | Autonomous ReAct loop with multi-tool execution (cap 4), exit codes, JSON syntax feedback, prompt injection defense, `<untrusted_tool_output>` boundaries, and 3-repeat stagnation halts. |
-| `src/agent/debate.ts` | **Added** | Dynamic multi-model debate engine querying candidate perspectives in parallel and synthesizing consensus and dissent. |
-| `src/agent/playbooks.ts` | **Added** | PlaybookStore with tactical knowledge distillation, parameterized template instantiation (`{{var}}`), and semantic goal recall. |
-| `src/agent/resolver.ts` | **Added** | ToolResolver providing capability-based command alternatives, auto-mutation on exit code 127 / command not found, and learned persistence in `~/.sauron/resolutions.json`. |
-| `src/agent/planner.ts` | **Added** | Dynamic DAGPlanner decomposing non-trivial goals into Recon $\rightarrow$ Inspect $\rightarrow$ Verify nodes, topological scheduling, and dynamic finding propagation. |
+| `package.json` | **Modified** | Installed `@opentui/core`, `@opentui/solid`, and `solid-js@1.9.12` with prebuilt Linux x64 Zig rendering binaries. |
+| `tsconfig.json` | **Modified** | Strict ESNext bundler configuration with `"jsxImportSource": "@opentui/solid"`. |
+| `bunfig.toml` | **Added** | Bun preload settings (`preload = ["@opentui/solid/preload"]`). |
+| `src/tui/opentui_app.tsx` | **Added** | Native OpenTUI + SolidJS JSX reactive TUI layout component with cell-buffer diffing and Flexbox layout engine. |
 | `src/tui/themes.ts` | **Added** | 34 bundled OpenCode color palettes (`opencode`, `catppuccin-macchiato`, `dracula`, `tokyonight`, `one-dark`, `nord`, etc.) & token resolution engine. |
 | `src/tui/keymaps.ts` | **Added** | OpenCode keybindings layer, leader key (`ctrl+x`), Emacs input actions (`ctrl+a`, `ctrl+e`, `ctrl+k`), and shortcuts registry (`ctrl+p`, `<leader>m`, `<leader>l`, `<leader>t`, `<leader>d`, `<leader>k`). |
 | `src/tui/modals.ts` | **Added** | Full-screen modal overlay system (`ModelSelectorDialog`, `SessionDrawerDialog`, `CommandPaletteDialog`, `ThemeSelectorDialog`, `HelpWhichKeyDialog`, `DiffViewerModal`). |
 | `src/tui/views.ts` | **Added** | Rich OpenCode component renderers (`SessionTabBar`, `SidebarPane`, `MessageCardRenderer`, `BlockTool`, `PatchDiff`, `PromptComposer` with `AssistantFooter` and extmarks). |
 | `src/tui/opencode_engine.ts` | **Added** | Full OpenCode terminal UI engine managing double-buffered alternate screen (`\x1b[?1049h`), synchronized output (`\x1b[?2026h`), split-pane layout, and keyboard router. |
+
 | `src/tui/index.ts` | **Added** | High-level TUI exports. |
 | `src/cli.ts` | **Modified** | Main TypeScript CLI router launching `OpenCodeEngine` directly for interactive chat. |
 | `tests/opencode_tui.test.ts` | **Added** | 4 unit and integration tests validating themes, keymaps, modal dialogs, and component renderers. |

@@ -45,5 +45,10 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "bun-types": "latest"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.6.0",
+    "@opentui/solid": "^0.6.0",
+    "solid-js": "1.9.12"
   }
 }
