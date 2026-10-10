@@ -17,7 +17,7 @@ const CORE_CLI = path.join(CORE_DIR, 'cli.py');
 const BOLD='\x1b[1m', DIM='\x1b[2m', RED='\x1b[31m', RST='\x1b[0m';
 
 // engine subcommands handled by the bundled Python core (./core/cli.py)
-const CORE_CMDS = new Set(['serve', 'chat', 'run', 'mission', 'diag', 'distill', 'models', 'debate']);
+const CORE_CMDS = new Set(['serve', 'chat', 'run', 'mission', 'diag', 'distill', 'models', 'debate', 'sessions']);
 
 function usage() {
   console.log(`${BOLD}sauron${RST}  one agent to route them all — offensive-security AI orchestrator
