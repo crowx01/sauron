@@ -26,7 +26,7 @@ from typing import Callable
 
 log = logging.getLogger(__name__)
 
-FALLBACK_TRIGGERS: frozenset[int] = frozenset({402, 413, 429, 503})
+FALLBACK_TRIGGERS: frozenset[int] = frozenset({402, 404, 413, 429, 503})
 
 SILENT_BLOCK_MARKERS: tuple[str, ...] = (
     "response blocked or incomplete",
@@ -37,11 +37,10 @@ SILENT_BLOCK_MARKERS: tuple[str, ...] = (
     "response was blocked",
 )
 
-# A 400 is normally a client error (don't retry), EXCEPT when it means the model
+# A 400 or 404 is normally a client error (don't retry), EXCEPT when it means the model
 # id itself doesn't exist at the provider — a phantom/retired catalog entry (e.g.
 # a fallback target routed to the wrong provider). Those must SKIP to the next
-# peer, not raise and kill the whole chain (observed 2026-10-08:
-# openai/gpt-5.1-codex-mini 400'd model_not_found on HuggingFace and crashed a run).
+# peer, not raise and kill the whole chain.
 _MODEL_GONE_MARKERS: tuple[str, ...] = (
     "model_not_found",
     "model not found",
@@ -50,6 +49,8 @@ _MODEL_GONE_MARKERS: tuple[str, ...] = (
     "unknown model",
     "model_not_exist",
     "invalid model",
+    "404",
+    "not found",
 )
 
 
