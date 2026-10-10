@@ -146,3 +146,58 @@ def latest() -> dict | None:
     """The single most-recent session summary, or None."""
     rows = recent(1)
     return rows[0] if rows else None
+
+
+def clear_all() -> bool:
+    """Delete all stored chat sessions from SQLite database and history files."""
+    ok = False
+    with _lock:
+        conn = _connect()
+        if conn is not None:
+            try:
+                conn.execute("DELETE FROM chat_sessions")
+                conn.commit()
+                log.info("Cleared all chat_sessions from storage")
+                ok = True
+            except Exception as exc:  # noqa: BLE001
+                log.debug("session_store clear_all failed: %s", exc)
+
+    try:
+        from providers.router.chat_history import history_dir
+        h_dir = history_dir()
+        if h_dir.exists() and h_dir.is_dir():
+            for f in h_dir.glob("*.jsonl"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return ok
+
+
+def delete_session(session_id: str) -> bool:
+    """Delete a specific session by ID from SQLite database and history files."""
+    if not session_id:
+        return False
+    ok = False
+    with _lock:
+        conn = _connect()
+        if conn is not None:
+            try:
+                conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+                conn.commit()
+                ok = True
+            except Exception as exc:  # noqa: BLE001
+                log.debug("session_store delete_session failed: %s", exc)
+
+    try:
+        from providers.router.chat_history import history_path
+        p = history_path(session_id)
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+    return ok
+
+
