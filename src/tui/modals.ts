@@ -3,7 +3,7 @@
  * Model Selector, Session Drawer, Command Palette, Theme Selector, Which-Key Help & Diff Viewer
  */
 
-import { themeStore, fg, fgBg, bold, dim, underline, ThemeTokens } from './themes';
+import { themeStore, fg, fgBg, bold, dim, underline, visibleLen, padToWidth, ThemeTokens } from './themes';
 import { keymapRegistry, KeyBinding } from './keymaps';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
@@ -25,7 +25,6 @@ export class ModalManager {
   private selectedIndex = 0;
   private filterQuery = '';
   private providerFilter = 'all';
-  private diffContent: { file: string; diffLines: string[] } | null = null;
 
   public getActiveModal(): ActiveModalType {
     return this.activeModal;
@@ -112,12 +111,11 @@ export class ModalManager {
     
     // Header Title
     const titleText = ` OPENCODE MODEL SELECTOR (${filtered.length} models) `;
-    const headerLine = `│ ${bold(fg(t.text.accent, titleText))}${' '.repeat(Math.max(0, dialogWidth - titleText.length - 5))}│`;
-    lines.push(headerLine);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.accent, titleText)), dialogWidth - 4)} │`);
 
     // Search input line
     const searchPrompt = ` Filter: ${this.filterQuery}█`;
-    lines.push(`│ ${fg(t.text.muted, searchPrompt)}${' '.repeat(Math.max(0, dialogWidth - searchPrompt.length - 3))}│`);
+    lines.push(`│ ${padToWidth(fg(t.text.muted, searchPrompt), dialogWidth - 4)} │`);
     lines.push(`├${borderChar.repeat(dialogWidth - 2)}┤`);
 
     // Model list
@@ -125,27 +123,23 @@ export class ModalManager {
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
 
     for (let i = 0; i < visibleCount; i++) {
-      const idx = i;
-      if (idx >= filtered.length) {
-        lines.push(`│${' '.repeat(dialogWidth - 2)}│`);
+      if (i >= filtered.length) {
+        lines.push(`│ ${' '.repeat(dialogWidth - 4)} │`);
         continue;
       }
 
-      const item = filtered[idx];
-      const isSelected = idx === this.selectedIndex;
+      const item = filtered[i];
+      const isSelected = i === this.selectedIndex;
       const star = isSelected ? '▶ ' : '  ';
       const providerBadge = `[${item.provider}]`.padEnd(14);
       const intelBadge = `IQ:${item.intelligence}`;
       const nameStr = item.model.padEnd(32);
 
       let lineStr = `${star}${providerBadge} ${nameStr} ${intelBadge}`;
-      if (lineStr.length > dialogWidth - 4) lineStr = lineStr.slice(0, dialogWidth - 4);
-      const padded = lineStr.padEnd(dialogWidth - 4);
-
       if (isSelected) {
-        lines.push(`│ ${fgBg(t.text.base, t.background.selection, bold(padded))} │`);
+        lines.push(`│ ${padToWidth(fgBg(t.text.base, t.background.selection, bold(lineStr)), dialogWidth - 4)} │`);
       } else {
-        lines.push(`│ ${fg(t.text.base, padded)} │`);
+        lines.push(`│ ${padToWidth(fg(t.text.base, lineStr), dialogWidth - 4)} │`);
       }
     }
 
@@ -165,7 +159,7 @@ export class ModalManager {
 
     lines.push(fg(t.border.active, `┌${'─'.repeat(drawerWidth - 2)}┐`));
     const title = ` SAURON SESSION DRAWER (${filtered.length} saved sessions) `;
-    lines.push(`│ ${bold(fg(t.text.action, title))}${' '.repeat(Math.max(0, drawerWidth - title.length - 3))}│`);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.action, title)), drawerWidth - 4)} │`);
     lines.push(`├${'─'.repeat(drawerWidth - 2)}┤`);
 
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
@@ -173,22 +167,22 @@ export class ModalManager {
 
     for (let i = 0; i < visibleCount; i++) {
       if (i >= filtered.length) {
-        lines.push(`│${' '.repeat(drawerWidth - 2)}│`);
+        lines.push(`│ ${' '.repeat(drawerWidth - 4)} │`);
         continue;
       }
 
       const s = filtered[i];
       const isSelected = i === this.selectedIndex;
       const prefix = isSelected ? '● ' : '  ';
-      const titleStr = s.title.slice(0, 30).padEnd(30);
+      const titleStr = s.title.slice(0, 24).padEnd(24);
       const msgStr = `${s.messages.length} msgs`;
       const timeStr = new Date(s.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-      const rowStr = `${prefix}${titleStr} │ ${msgStr.padEnd(8)} │ ${timeStr}`.padEnd(drawerWidth - 4);
+      const rowStr = `${prefix}${titleStr} │ ${msgStr.padEnd(8)} │ ${timeStr}`;
       if (isSelected) {
-        lines.push(`│ ${fgBg(t.text.base, t.background.selection, bold(rowStr))} │`);
+        lines.push(`│ ${padToWidth(fgBg(t.text.base, t.background.selection, bold(rowStr)), drawerWidth - 4)} │`);
       } else {
-        lines.push(`│ ${fg(t.text.muted, rowStr)} │`);
+        lines.push(`│ ${padToWidth(fg(t.text.muted, rowStr), drawerWidth - 4)} │`);
       }
     }
 
@@ -217,8 +211,8 @@ export class ModalManager {
     const lines: string[] = [];
 
     lines.push(fg(t.border.focus, `┌${'─'.repeat(pWidth - 2)}┐`));
-    lines.push(`│ ${bold(fg(t.text.accent, ' COMMAND PALETTE (ctrl+p)'))}${' '.repeat(pWidth - 28)}│`);
-    lines.push(`│ ${fg(t.text.muted, ` Query: > ${this.filterQuery}█`)}${' '.repeat(Math.max(0, pWidth - this.filterQuery.length - 13))}│`);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.accent, ' COMMAND PALETTE (ctrl+p)')), pWidth - 4)} │`);
+    lines.push(`│ ${padToWidth(fg(t.text.muted, ` Query: > ${this.filterQuery}█`), pWidth - 4)} │`);
     lines.push(`├${'─'.repeat(pWidth - 2)}┤`);
 
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
@@ -226,7 +220,7 @@ export class ModalManager {
 
     for (let i = 0; i < visibleCount; i++) {
       if (i >= filtered.length) {
-        lines.push(`│${' '.repeat(pWidth - 2)}│`);
+        lines.push(`│ ${' '.repeat(pWidth - 4)} │`);
         continue;
       }
 
@@ -236,11 +230,11 @@ export class ModalManager {
       const titleStr = item.title.padEnd(28);
       const scStr = (item.shortcut || '').padStart(12);
 
-      const rowStr = `${tag} ${titleStr} ${scStr}`.padEnd(pWidth - 4);
+      const rowStr = `${tag} ${titleStr} ${scStr}`;
       if (isSelected) {
-        lines.push(`│ ${fgBg(t.text.base, t.background.selection, bold(rowStr))} │`);
+        lines.push(`│ ${padToWidth(fgBg(t.text.base, t.background.selection, bold(rowStr)), pWidth - 4)} │`);
       } else {
-        lines.push(`│ ${fg(t.text.base, rowStr)} │`);
+        lines.push(`│ ${padToWidth(fg(t.text.base, rowStr), pWidth - 4)} │`);
       }
     }
 
@@ -259,7 +253,7 @@ export class ModalManager {
     const lines: string[] = [];
 
     lines.push(fg(t.border.active, `┌${'─'.repeat(tWidth - 2)}┐`));
-    lines.push(`│ ${bold(fg(t.text.action, ' SELECT THEME PALETTE'))}${' '.repeat(tWidth - 24)}│`);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.action, ' SELECT THEME PALETTE')), tWidth - 4)} │`);
     lines.push(`├${'─'.repeat(tWidth - 2)}┤`);
 
     this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, filtered.length - 1));
@@ -267,7 +261,7 @@ export class ModalManager {
 
     for (let i = 0; i < visibleCount; i++) {
       if (i >= filtered.length) {
-        lines.push(`│${' '.repeat(tWidth - 2)}│`);
+        lines.push(`│ ${' '.repeat(tWidth - 4)} │`);
         continue;
       }
 
@@ -275,12 +269,12 @@ export class ModalManager {
       const isSelected = i === this.selectedIndex;
       const isCurrent = themeStore.getTheme().name === thName;
       const mark = isCurrent ? '✓ ' : '  ';
-      const nameStr = `${mark}${thName}`.padEnd(tWidth - 4);
+      const nameStr = `${mark}${thName}`;
 
       if (isSelected) {
-        lines.push(`│ ${fgBg(t.text.base, t.background.selection, bold(nameStr))} │`);
+        lines.push(`│ ${padToWidth(fgBg(t.text.base, t.background.selection, bold(nameStr)), tWidth - 4)} │`);
       } else {
-        lines.push(`│ ${fg(t.text.muted, nameStr)} │`);
+        lines.push(`│ ${padToWidth(fg(t.text.muted, nameStr), tWidth - 4)} │`);
       }
     }
 
@@ -296,23 +290,23 @@ export class ModalManager {
     const lines: string[] = [];
 
     lines.push(fg(t.border.focus, `┌${'─'.repeat(kWidth - 2)}┐`));
-    lines.push(`│ ${bold(fg(t.text.accent, ' WHICH-KEY SHORTCUT OVERLAY (Leader Key: ctrl+x)'))}${' '.repeat(Math.max(0, kWidth - 52))}│`);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.accent, ' WHICH-KEY SHORTCUT OVERLAY (Leader Key: ctrl+x)')), kWidth - 4)} │`);
     lines.push(`├${'─'.repeat(kWidth - 2)}┤`);
 
     const visibleCount = kHeight - 4;
     for (let i = 0; i < visibleCount; i++) {
       if (i >= bindings.length) {
-        lines.push(`│${' '.repeat(kWidth - 2)}│`);
+        lines.push(`│ ${' '.repeat(kWidth - 4)} │`);
         continue;
       }
 
       const b = bindings[i];
       const keyStr = bold(b.key.padEnd(20));
       const nameStr = b.name.padEnd(24);
-      const descStr = b.description.slice(0, 30);
+      const descStr = b.description.slice(0, 26);
 
-      const row = `${keyStr} │ ${nameStr} │ ${descStr}`.padEnd(kWidth - 4);
-      lines.push(`│ ${fg(t.text.base, row)} │`);
+      const row = `${keyStr} │ ${nameStr} │ ${descStr}`;
+      lines.push(`│ ${padToWidth(row, kWidth - 4)} │`);
     }
 
     lines.push(fg(t.border.focus, `└${'─'.repeat(kWidth - 2)}┘`));
@@ -326,7 +320,7 @@ export class ModalManager {
     const lines: string[] = [];
 
     lines.push(fg(t.border.active, `┌${'─'.repeat(dWidth - 2)}┐`));
-    lines.push(`│ ${bold(fg(t.text.action, ' SAURON UNIFIED/SPLIT DIFF VIEWER'))}${' '.repeat(Math.max(0, dWidth - 36))}│`);
+    lines.push(`│ ${padToWidth(bold(fg(t.text.action, ' SAURON UNIFIED/SPLIT DIFF VIEWER')), dWidth - 4)} │`);
     lines.push(`├${'─'.repeat(dWidth - 2)}┤`);
 
     const mockDiff = [
@@ -342,7 +336,7 @@ export class ModalManager {
 
     for (let i = 0; i < dHeight - 4; i++) {
       if (i >= mockDiff.length) {
-        lines.push(`│${' '.repeat(dWidth - 2)}│`);
+        lines.push(`│ ${' '.repeat(dWidth - 4)} │`);
         continue;
       }
 
@@ -352,7 +346,7 @@ export class ModalManager {
       else if (l.startsWith('-')) formatted = fgBg(t.diff.removeText, t.diff.removeBg, l);
       else if (l.startsWith('@')) formatted = fgBg(t.diff.headerText, t.diff.headerBg, l);
 
-      lines.push(`│ ${formatted}${' '.repeat(Math.max(0, dWidth - l.length - 4))} │`);
+      lines.push(`│ ${padToWidth(formatted, dWidth - 4)} │`);
     }
 
     lines.push(fg(t.border.active, `└${'─'.repeat(dWidth - 2)}┘`));

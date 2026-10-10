@@ -88,7 +88,18 @@ export function underline(text: string): string {
   return `\x1b[4m${text}\x1b[24m`;
 }
 
+export function visibleLen(str: string): number {
+  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '').length;
+}
+
+export function padToWidth(str: string, targetWidth: number): string {
+  const vis = visibleLen(str);
+  const diff = targetWidth - vis;
+  return diff > 0 ? str + ' '.repeat(diff) : str;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
+
   const clean = hex.replace('#', '');
   if (clean.length === 3) {
     return [
