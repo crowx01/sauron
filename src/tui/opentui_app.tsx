@@ -3,6 +3,7 @@ import { createSignal, createEffect, onCleanup, For, Show } from 'solid-js';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
 import { themeStore } from './themes';
+import { keymapRegistry, cyclePromptMode } from './keymaps';
 import { OpenCodeEngine } from './opencode_engine';
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -54,6 +55,15 @@ export function OpenTUIApp() {
 
   // Keyboard router: Full typing, shortcuts, cursor navigation & mouse wheel scroll
   useKeyboard((key) => {
+    // Shift+Tab Mode Switcher (NORMAL -> /COMMAND -> !SHELL -> @ATTACH -> NORMAL)
+    const raw = key.raw || key.sequence || '';
+    if (key.name === 'backtab' || (key.name === 'tab' && key.shift) || raw.includes('\x1b[Z')) {
+      const res = cyclePromptMode(prompt(), cursorPos());
+      setPrompt(res.text);
+      setCursorPos(res.pos);
+      return;
+    }
+
     if (key.ctrl && key.name === 'c') {
       process.exit(0);
     }
@@ -75,7 +85,6 @@ export function OpenTUIApp() {
     }
 
     // Transcript Mouse Wheel Scroll & PageUp / PageDown
-    const raw = key.raw || key.sequence || '';
     if (key.name === 'pageup' || raw.includes('<64;') || raw.startsWith('\x1b[<64')) {
       setScrollOffset((s) => s + 3);
       return;

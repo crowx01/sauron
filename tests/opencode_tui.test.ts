@@ -85,4 +85,28 @@ describe('OpenCode TUI Architecture Suite', () => {
     expect(sessionStore.listSessions().length).toBe(1);
     expect(sessionStore.getActiveSession().messages.length).toBe(0);
   });
+
+  test('Modes: cyclePromptMode cycles NORMAL -> /COMMAND -> !SHELL -> @ATTACH -> NORMAL via Shift+Tab', () => {
+    const { cyclePromptMode } = require('../src/tui/keymaps');
+    
+    // Start NORMAL -> /COMMAND
+    let res = cyclePromptMode('hello', 5);
+    expect(res.text).toBe('/hello');
+    expect(res.pos).toBe(6);
+
+    // /COMMAND -> !SHELL
+    res = cyclePromptMode(res.text, res.pos);
+    expect(res.text).toBe('!hello');
+    expect(res.pos).toBe(6);
+
+    // !SHELL -> @ATTACH
+    res = cyclePromptMode(res.text, res.pos);
+    expect(res.text).toBe('@hello');
+    expect(res.pos).toBe(6);
+
+    // @ATTACH -> NORMAL
+    res = cyclePromptMode(res.text, res.pos);
+    expect(res.text).toBe('hello');
+    expect(res.pos).toBe(5);
+  });
 });

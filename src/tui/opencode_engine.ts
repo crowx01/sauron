@@ -4,7 +4,7 @@
  */
 
 import { themeStore, visibleLen } from './themes';
-import { keymapRegistry } from './keymaps';
+import { keymapRegistry, cyclePromptMode } from './keymaps';
 import { modalManager } from './modals';
 import { SessionTabBar, SidebarPane, MessageCardRenderer, PromptComposer } from './views';
 import { sessionStore } from '../session';
@@ -88,6 +88,15 @@ export class OpenCodeEngine {
 
   private handleInput(str: string) {
     const key = this.parseKey(str);
+
+    // Shift+Tab Mode Switcher (NORMAL -> /COMMAND -> !SHELL -> @ATTACH -> NORMAL)
+    if (key.name === 'backtab' || (key.name === 'tab' && key.shift) || str === '\x1b[Z') {
+      const res = cyclePromptMode(this.promptBuffer, this.cursorOffset);
+      this.promptBuffer = res.text;
+      this.cursorOffset = res.pos;
+      this.render();
+      return;
+    }
 
     // Ctrl+C / Ctrl+D Exit
     if (key.ctrl && (key.name === 'c' || key.name === 'd')) {
@@ -485,7 +494,8 @@ export class OpenCodeEngine {
     if (str === '\x1bOR') return { name: 'f3' };
     if (str === '\x1bOS') return { name: 'f4' };
     
-    // Check shift+return
+    // Check shift+return and shift+tab (backtab)
+    if (str === '\x1b[Z' || str === '\x1b[9;2u') return { name: 'backtab', shift: true };
     if (str === '\x1b[13;2u' || str === '\x1b\r') return { name: 'return', shift: true };
 
     return { name: str };

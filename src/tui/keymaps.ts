@@ -102,4 +102,33 @@ export class KeymapRegistry {
   }
 }
 
+export function cyclePromptMode(promptText: string, cursorPos: number): { text: string; pos: number } {
+  let mode = 'normal';
+  let body = promptText;
+
+  if (promptText.startsWith('/')) {
+    mode = 'command';
+    body = promptText.slice(1);
+  } else if (promptText.startsWith('!')) {
+    mode = 'shell';
+    body = promptText.slice(1);
+  } else if (promptText.startsWith('@')) {
+    mode = 'attach';
+    body = promptText.slice(1);
+  }
+
+  let nextPrefix = '';
+  if (mode === 'normal') nextPrefix = '/';
+  else if (mode === 'command') nextPrefix = '!';
+  else if (mode === 'shell') nextPrefix = '@';
+  else if (mode === 'attach') nextPrefix = '';
+
+  const newText = nextPrefix + body;
+  const oldPrefixLen = mode === 'normal' ? 0 : 1;
+  const newPrefixLen = nextPrefix.length;
+  const newPos = Math.max(0, Math.min(newText.length, cursorPos - oldPrefixLen + newPrefixLen));
+
+  return { text: newText, pos: newPos };
+}
+
 export const keymapRegistry = new KeymapRegistry();
