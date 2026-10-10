@@ -2656,9 +2656,22 @@ def _plan_failure_reason(data, res_path: str) -> str:
         tr = data.get("transcript")
         if isinstance(tr, list) and tr and isinstance(tr[-1], dict):
             last = tr[-1]
+            ex = last.get("exec")
+            if isinstance(ex, dict):
+                ef = ex.get("edits_failed")
+                if ef:
+                    bits.append("edits_failed: " + str(ef)[:300])
+                cc = [c for c in (ex.get("code_checks") or []) if not c.get("ok")]
+                if cc:
+                    bits.append("code_checks_failed: " + str(cc)[:300])
+                vf = [v for v in (ex.get("verify") or []) if not v.get("ok")]
+                if vf:
+                    bits.append("verify_failed: " + str(vf)[:400])
             v = last.get("verdict")
-            if isinstance(v, dict) and v.get("reason"):
-                bits.append("judge: " + str(v["reason"]))
+            if isinstance(v, dict) and v.get("feedback"):
+                bits.append("judge: " + str(v["feedback"])[:400])
+            elif isinstance(v, dict) and v.get("reason"):
+                bits.append("judge: " + str(v["reason"])[:400])
             for rv in (last.get("reviews") or [])[:1]:
                 note = rv.get("note") if isinstance(rv, dict) else None
                 if isinstance(note, dict) and note.get("issues"):
