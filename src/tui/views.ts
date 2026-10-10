@@ -182,14 +182,24 @@ export class PromptComposer {
     lines.push(fg(t.border.focus, `┌${border}┐`));
 
     // Render multiline input with cursor
+    const cur = Math.max(0, Math.min(buffer.length, cursorOffset));
     const linesText = buffer.split('\n');
     if (linesText.length === 0 || buffer === '') {
       lines.push(`│ ${padToWidth(`${modeBadge} ${dim('Type prompt, @file, /command, or !shell...')}█`, boxW - 4)} │`);
     } else {
+      let lineStart = 0;
       for (let i = 0; i < linesText.length; i++) {
-        let l = linesText[i];
-        if (i === linesText.length - 1) l += '█';
-        const formatted = l.startsWith('!') ? fg(t.text.error, l) : l.startsWith('/') ? fg(t.text.action, l) : l;
+        const rawL = linesText[i];
+        const col = cur - lineStart;
+        const isCurrentLine = col >= 0 && col <= rawL.length;
+        
+        let l = rawL;
+        if (isCurrentLine) {
+          const under = col < rawL.length ? rawL[col] : ' ';
+          l = rawL.slice(0, col) + '\x1b[7m' + under + '\x1b[27m' + (col < rawL.length ? rawL.slice(col + 1) : '');
+        }
+        lineStart += rawL.length + 1;
+        const formatted = rawL.startsWith('!') ? fg(t.text.error, l) : rawL.startsWith('/') ? fg(t.text.action, l) : l;
         lines.push(`│ ${padToWidth(formatted, boxW - 4)} │`);
       }
     }

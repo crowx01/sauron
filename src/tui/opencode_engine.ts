@@ -18,6 +18,7 @@ export class OpenCodeEngine {
   private isRaw = false;
   private promptBuffer = '';
   private cursorOffset = 0;
+  private scrollOffset = 0;
   private historyIndex = -1;
   private promptHistory: string[] = [];
   private isBusy = false;
@@ -40,8 +41,8 @@ export class OpenCodeEngine {
   public start() {
     if (this.isRaw) return;
 
-    // Enter alternate screen buffer & hide cursor
-    process.stdout.write('\x1b[?1049h\x1b[?25l');
+    // Enter alternate screen buffer, enable SGR 1000/1006 mouse tracking & hide cursor
+    process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l');
 
     if (process.stdin.setRawMode) {
       process.stdin.setRawMode(true);
@@ -75,8 +76,8 @@ export class OpenCodeEngine {
       this.isRaw = false;
     }
 
-    // Leave alternate screen buffer & show cursor
-    process.stdout.write('\x1b[?25h\x1b[?1049l');
+    // Disable SGR mouse tracking, leave alternate screen buffer & show cursor
+    process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
 
     if (error) {
       console.error('\n[SAURON TUI PANIC RECOVERY]:', error);
@@ -116,11 +117,25 @@ export class OpenCodeEngine {
       return;
     }
 
-    // 3. Prompt History Navigation (Up/Down)
+    // 3. Mouse Wheel Scroll & PageUp / PageDown Transcript Scroll
+    if (key.name === 'pageup') {
+      this.scrollOffset += 3;
+      this.render();
+      return;
+    }
+
+    if (key.name === 'pagedown') {
+      this.scrollOffset = Math.max(0, this.scrollOffset - 3);
+      this.render();
+      return;
+    }
+
+    // 4. Prompt History Navigation (Up/Down)
     if (key.name === 'up' && this.promptHistory.length > 0) {
       if (this.historyIndex < this.promptHistory.length - 1) {
         this.historyIndex++;
         this.promptBuffer = this.promptHistory[this.promptHistory.length - 1 - this.historyIndex];
+        this.cursorOffset = this.promptBuffer.length;
       }
       this.render();
       return;
@@ -134,24 +149,48 @@ export class OpenCodeEngine {
         this.historyIndex = -1;
         this.promptBuffer = '';
       }
+      this.cursorOffset = this.promptBuffer.length;
       this.render();
       return;
     }
 
-    // 4. Backspace
+    // 5. Cursor movement & deletion
+    if (key.name === 'left' || key.name === 'right') {
+      const delta = key.name === 'left' ? -1 : 1;
+      this.cursorOffset = Math.max(0, Math.min(this.promptBuffer.length, this.cursorOffset + delta));
+      this.render();
+      return;
+    }
+
     if (key.name === 'backspace') {
-      this.promptBuffer = this.promptBuffer.slice(0, -1);
+      const c = this.cursorOffset;
+      if (c > 0) {
+        this.promptBuffer = this.promptBuffer.slice(0, c - 1) + this.promptBuffer.slice(c);
+        this.cursorOffset = c - 1;
+      }
       this.render();
       return;
     }
 
-    // 5. Submit Prompt (Enter)
+    if (key.name === 'delete') {
+      const c = this.cursorOffset;
+      this.promptBuffer = this.promptBuffer.slice(0, c) + this.promptBuffer.slice(c + 1);
+      this.render();
+      return;
+    }
+
+    if (key.name === 'home') { this.cursorOffset = 0; this.render(); return; }
+    if (key.name === 'end') { this.cursorOffset = this.promptBuffer.length; this.scrollOffset = 0; this.render(); return; }
+
+    // 6. Submit Prompt (Enter)
     if (key.name === 'return' && !key.shift && !key.ctrl && !key.alt) {
       if (this.promptBuffer.trim().length > 0) {
         const userText = this.promptBuffer;
         this.promptHistory.push(userText);
         this.historyIndex = -1;
         this.promptBuffer = '';
+        this.cursorOffset = 0;
+        this.scrollOffset = 0;
         if (userText.trim().startsWith('/') && this.handleSlashCommand(userText.trim())) {
           this.render();
           return;
@@ -163,16 +202,22 @@ export class OpenCodeEngine {
 
     // Newline on Shift+Enter or Alt+Enter
     if (key.name === 'return' && (key.shift || key.alt || key.ctrl)) {
-      this.promptBuffer += '\n';
+      this.insertAtCursor('\n');
       this.render();
       return;
     }
 
     // Plain text typing (also handles pasted chunks)
     if (!key.ctrl && !key.alt && /^[\x20-\x7e\u00a0-\uffff]+$/.test(str)) {
-      this.promptBuffer += str;
+      this.insertAtCursor(str);
       this.render();
     }
+  }
+
+  private insertAtCursor(text: string) {
+    const c = this.cursorOffset;
+    this.promptBuffer = this.promptBuffer.slice(0, c) + text + this.promptBuffer.slice(c);
+    this.cursorOffset = c + text.length;
   }
 
   private notify(text: string) {
@@ -262,11 +307,12 @@ export class OpenCodeEngine {
         break;
       case 'CURSOR_HOME': this.cursorOffset = 0; break;
       case 'CURSOR_END': this.cursorOffset = this.promptBuffer.length; break;
-      case 'CLEAR_LINE': this.promptBuffer = ''; break;
+      case 'CLEAR_LINE': this.promptBuffer = ''; this.cursorOffset = 0; break;
       case 'KILL_WORD':
         const words = this.promptBuffer.trimEnd().split(' ');
         words.pop();
         this.promptBuffer = words.join(' ');
+        this.cursorOffset = this.promptBuffer.length;
         break;
     }
   }
@@ -342,15 +388,26 @@ export class OpenCodeEngine {
     const sidebarLines = isSidebarVisible ? this.sidebar.render(sidebarW, mainH, t) : [];
 
     
-    // Main Transcript Scrollbox
+    // Main Transcript Scrollbox with scrollOffset support
     const transcriptLines: string[] = [];
     for (const msg of activeSession.messages) {
       transcriptLines.push(...this.cardRenderer.renderMessage(msg, mainW, t));
     }
 
-    const visibleTranscript = transcriptLines.slice(-mainH);
+    const totalLines = transcriptLines.length;
+    const maxScroll = Math.max(0, totalLines - mainH);
+    this.scrollOffset = Math.min(maxScroll, Math.max(0, this.scrollOffset));
+
+    const end = Math.max(mainH, totalLines - this.scrollOffset);
+    const start = Math.max(0, end - mainH);
+    const visibleTranscript = transcriptLines.slice(start, end);
     while (visibleTranscript.length < mainH) {
       visibleTranscript.unshift('');
+    }
+
+    if (this.scrollOffset > 0 && visibleTranscript.length > 0) {
+      const banner = ` ▲ SCROLLED UP (${this.scrollOffset} lines) - Press End or type to return to bottom `;
+      visibleTranscript[0] = padToWidth(banner, mainW);
     }
 
     for (let r = 0; r < mainH; r++) {
@@ -382,6 +439,10 @@ export class OpenCodeEngine {
   }
 
   private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean } {
+    // SGR Mouse wheel scroll decoding (<64; = Up, <65; = Down) or PageUp/PageDown
+    if (str.includes('<64;') || str.startsWith('\x1b[<64') || str === '\x1b[5~') return { name: 'pageup' };
+    if (str.includes('<65;') || str.startsWith('\x1b[<65') || str === '\x1b[6~') return { name: 'pagedown' };
+
     // Ctrl+<letter> arrives as a single control byte (0x01-0x1a), excluding tab/enter/backspace
     if (str.length === 1) {
       const code = str.charCodeAt(0);
@@ -401,6 +462,9 @@ export class OpenCodeEngine {
     if (str === '\x1b[B' || str === '\x1bOB') return { name: 'down' };
     if (str === '\x1b[C' || str === '\x1bOC') return { name: 'right' };
     if (str === '\x1b[D' || str === '\x1bOD') return { name: 'left' };
+    if (str === '\x1b[3~') return { name: 'delete' };
+    if (str === '\x1b[H' || str === '\x1bOH' || str === '\x1b[1~' || str === '\x1b[7~') return { name: 'home' };
+    if (str === '\x1b[F' || str === '\x1bOF' || str === '\x1b[4~' || str === '\x1b[8~') return { name: 'end' };
     
     if (str === '\r' || str === '\n') return { name: 'return' };
     if (str === '\x7f' || str === '\x08') return { name: 'backspace' };
