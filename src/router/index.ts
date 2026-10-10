@@ -3,7 +3,14 @@ import { providerRegistry, LocalSessionProviderClient } from '../providers';
 import { lessonStore } from './lessons';
 
 export class ChatRouter {
+  public defaultModel = 'claude-3-7-sonnet';
+
+  public getDefaultModel(): string {
+    return this.defaultModel;
+  }
+
   private catalog: ModelEntry[] = [
+
     { model: 'claude-3-7-sonnet', provider: 'anthropic', intelligence: 98, costRank: 3, routable: true, tools: true, aliases: ['sonnet-3.7', 'claude-3.7'] },
     { model: 'claude-3-5-sonnet-20241022', provider: 'anthropic', intelligence: 95, costRank: 3, routable: true, tools: true, aliases: ['sonnet', 'claude-3.5-sonnet'] },
     { model: 'claude-cli', provider: 'claude-cli', intelligence: 94, costRank: 1, routable: true, tools: true, aliases: ['claude'] },
