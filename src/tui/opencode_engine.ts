@@ -272,6 +272,7 @@ export class OpenCodeEngine {
   }
 
   private promptQueue: string[] = [];
+  private spinnerTimer: Timer | null = null;
 
   private enqueueUserPrompt(text: string) {
     sessionStore.addMessage('user', text);
@@ -284,6 +285,10 @@ export class OpenCodeEngine {
     if (this.isBusy || this.promptQueue.length === 0) return;
 
     this.isBusy = true;
+    if (!this.spinnerTimer) {
+      this.spinnerTimer = setInterval(() => this.render(), 100);
+    }
+
     const currentPrompt = this.promptQueue.shift();
     this.render();
 
@@ -305,11 +310,16 @@ export class OpenCodeEngine {
       sessionStore.addMessage('system', `Error: ${e.message}`);
     } finally {
       this.isBusy = false;
+      if (this.spinnerTimer) {
+        clearInterval(this.spinnerTimer);
+        this.spinnerTimer = null;
+      }
       this.render();
       // Drain next item in queue!
       setImmediate(() => this.drainQueue());
     }
   }
+
 
   public render() {
     const t = themeStore.getTheme();
