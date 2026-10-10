@@ -2913,10 +2913,10 @@ async def _run(handle):
     _orig_console = console
 
     def _alt_scroll(on: bool) -> None:
-        # DECSET 1007 — terminal sends Up/Down keys on wheel while on the alt
-        # screen, WITHOUT mouse tracking (so native select/copy still works).
-        if os.getenv("PAL_CHAT_MOUSE", "0").strip().lower() in ("1", "true", "on", "yes"):
-            return  # real mouse tracking is on instead; don't fight it
+        # DECSET 1007 — terminal sends Up/Down keys on wheel while on the alt screen.
+        # Disabled by default so mouse wheel scrolling never hijacks Up/Down arrow history recall.
+        if os.getenv("PAL_CHAT_ALT_SCROLL", "0").strip().lower() not in ("1", "true", "on", "yes"):
+            return
         try:
             with open("/dev/tty", "w") as _tty:
                 _tty.write("\x1b[?1007h" if on else "\x1b[?1007l")
