@@ -164,6 +164,43 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
   });
 
   // -------------------------------------------------------------
+  // ITEM 1.6: Workspace Blast-Radius Scorer & Routing Term
+  // -------------------------------------------------------------
+  test('Item 1.6: computeBlastRadius scores touched files, import/export depth, and diagnostics', () => {
+    const { computeBlastRadius } = require('../src/router/blast_radius');
+    const result = computeBlastRadius(['src/router/index.ts', 'src/types/index.ts']);
+
+    expect(result).toBeDefined();
+    expect(result.score).toBeGreaterThan(0);
+    expect(result.reasons.length).toBeGreaterThan(0);
+    expect(result.reasons[0]).toContain('2 file(s) touched');
+  });
+
+  test('Item 1.7: computeComplexityScore incorporates blast-radius weighted term for concrete files', () => {
+    const candidate: ModelEntry = {
+      model: 'test-model',
+      provider: 'test-provider',
+      intelligence: 90,
+      costRank: 2,
+      routable: true,
+      tools: false,
+      aliases: []
+    };
+
+    const classification: TaskClassification = {
+      category: 'codegen',
+      planDepth: 3,
+      ambiguity: 0.2
+    };
+
+    const scoreNoFiles = chatRouter.computeComplexityScore(candidate, 'codegen', classification);
+    const scoreWithFiles = chatRouter.computeComplexityScore(candidate, 'codegen', classification, ['src/router/index.ts']);
+
+    // Blast radius should increase complexity score towards higher intelligence candidate
+    expect(scoreWithFiles).toBeGreaterThan(scoreNoFiles);
+  });
+
+  // -------------------------------------------------------------
   // ITEM 2: Extended LessonStore Ledger & Recency-Weighted Bias
   // -------------------------------------------------------------
   test('Item 2.1: LessonStore tracks fuller ledger with latency, costRank, and taskCategory', () => {

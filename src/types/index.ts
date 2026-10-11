@@ -55,6 +55,7 @@ export interface RouterOptions {
   taskCategory?: string;
   sessionId?: string;
   classification?: TaskClassification;
+  targetFiles?: string[];
 }
 
 export interface StreamChunk {
