@@ -27,6 +27,32 @@ export class ChatRouter {
   private isRefreshing = false;
   private classificationCache = new Map<string, { classification: TaskClassification; expiresAt: number }>();
 
+  // Trivial chit-chat (greetings, thanks, acks) never deserves a classify-probe call or a
+  // smart-tier model — it should be free, instant, and handled by local-engine's own matcher.
+  // Added 2026-10-11: gemini-3.1-pro-high (antigravity) was answering plain "hi" because (a) the
+  // classify-probe's failure path defaulted to forceEscalate:true, and (b) local-engine was
+  // structurally excluded from the 'auto' candidate pool regardless of how low the complexity was.
+  private static readonly TRIVIAL_CHITCHAT_RE =
+    /^(hi|hello|hey|yo|sup|howdy|good\s?(morning|afternoon|evening|night)|hiya|thanks|thank\s?you|thx|ty|ok|okay|k|cool|nice|great|sounds good|got it|np|no problem|yep|yes|yeah|nope|no|bye|goodbye|see\s?ya|cya)[\s!.?]*$/i;
+
+  public isTrivialChitchat(prompt: string): boolean {
+    const trimmed = prompt.trim();
+    return trimmed.length > 0 && trimmed.length <= 32 && ChatRouter.TRIVIAL_CHITCHAT_RE.test(trimmed);
+  }
+
+  private trivialClassification(): TaskClassification {
+    return {
+      category: 'general',
+      domain: 'general',
+      planDepth: 1,
+      ambiguity: 0,
+      confidence: 1,
+      is_ambiguous: false,
+      schema_conformant: true,
+      forceEscalate: false
+    };
+  }
+
   public getCachedClassification(sessionId: string): TaskClassification | undefined {
     const entry = this.classificationCache.get(sessionId);
     if (!entry) return undefined;
@@ -367,9 +393,19 @@ Task: ${promptText}`;
       // Claude (anthropic/openrouter-claude/claude-cli) is never an auto cheap/smart pick —
       // policy: sauron never spends Claude tokens on its own initiative. Claude stays
       // reachable only via explicit `--model claude-cli` / `--model claude-3-7-sonnet` etc.
+      const isConfidentlyTrivial = !!classification
+        && !classification.forceEscalate
+        && classification.planDepth <= 1
+        && classification.ambiguity <= 0.2
+        && (classification.confidence ?? 0) >= 0.8;
+
       const shouldForceSmart = classification?.forceEscalate || mode === 'smart';
 
-      if (shouldForceSmart) {
+      if (isConfidentlyTrivial && available.includes('local-engine') && mode !== 'smart') {
+        // Trivial chit-chat / near-zero plan depth never deserves a paid/CLI-spawned model —
+        // local-engine's own matcher handles it for free. See isTrivialChitchat() above.
+        targetModel = 'local-engine';
+      } else if (shouldForceSmart) {
         const smartCandidates = this.catalog
           .filter((m) => m.routable && realAvailable.includes(m.provider))
           .sort((a, b) => b.intelligence - a.intelligence);
@@ -458,7 +494,9 @@ Task: ${promptText}`;
       if (!classification && messages && messages.length > 0) {
         const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
         if (promptText) {
-          classification = (await this.classifyTask(promptText, options)) ?? undefined;
+          classification = this.isTrivialChitchat(promptText)
+            ? this.trivialClassification()
+            : (await this.classifyTask(promptText, options)) ?? undefined;
           if (classification) {
             this.setCachedClassification(sessionId, classification);
           }
@@ -506,7 +544,9 @@ Task: ${promptText}`;
       if (!classification) {
         const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
         if (promptText) {
-          classification = (await this.classifyTask(promptText, options)) ?? undefined;
+          classification = this.isTrivialChitchat(promptText)
+            ? this.trivialClassification()
+            : (await this.classifyTask(promptText, options)) ?? undefined;
           if (classification) {
             this.setCachedClassification(sessionId, classification);
           }
