@@ -1,12 +1,70 @@
 import { Message, ModelEntry, RouterOptions, StreamChunk } from '../types';
 import { providerRegistry, LocalSessionProviderClient } from '../providers';
 import { lessonStore } from './lessons';
+import {
+  STATIC_CATALOG,
+  loadCachedCatalog,
+  fetchDynamicCatalog,
+  readDiskCache
+} from './catalog_fetch';
+
+export { STATIC_CATALOG };
 
 export class ChatRouter {
   public defaultModel = 'gemini-3.1-pro-high';
 
   public getDefaultModel(): string {
     return this.defaultModel;
+  }
+
+  public catalog: ModelEntry[] = [];
+  private isRefreshing = false;
+
+  constructor() {
+    this.initCatalog();
+  }
+
+  private initCatalog(): void {
+    const cached = loadCachedCatalog();
+    this.catalog = [...STATIC_CATALOG, ...cached.openai, ...cached.openrouter];
+
+    if (cached.openaiStale || cached.openrouterStale) {
+      this.refreshCatalog().catch(() => {});
+    }
+  }
+
+  public checkAndRefreshStale(): void {
+    const cached = loadCachedCatalog();
+    if (cached.openaiStale || cached.openrouterStale) {
+      this.refreshCatalog().catch(() => {});
+    }
+  }
+
+  public async refreshCatalog(): Promise<void> {
+    if (this.isRefreshing) return;
+    this.isRefreshing = true;
+    try {
+      const dynamic = await fetchDynamicCatalog();
+      this.updateDynamicCatalog(dynamic.openai, dynamic.openrouter);
+    } catch {
+      // Never throw
+    } finally {
+      this.isRefreshing = false;
+    }
+  }
+
+  public updateDynamicCatalog(openaiModels: ModelEntry[], openrouterModels: ModelEntry[]): void {
+    const staticOpenRouterModels = new Set(
+      STATIC_CATALOG.filter((m) => m.provider === 'openrouter').map((m) => m.model)
+    );
+
+    const nonDynamic = this.catalog.filter((m) => {
+      if (m.provider === 'openai') return false;
+      if (m.provider === 'openrouter') return staticOpenRouterModels.has(m.model);
+      return true;
+    });
+
+    this.catalog = [...nonDynamic, ...openaiModels, ...openrouterModels];
   }
 
   /** Resolve a model name or alias against the catalog; returns the canonical name or null. */
@@ -21,36 +79,8 @@ export class ChatRouter {
     this.defaultModel = model;
   }
 
-  private catalog: ModelEntry[] = [
-
-    // Claude-backed entries: explicit-selection only (routable:false), never auto/cheap/smart-picked.
-    // Policy: sauron never spends Claude tokens on its own initiative — see Antigravity's
-    // claude-sonnet-4-6 / claude-opus-4-6-thinking entries below for the same pattern.
-    { model: 'claude-3-7-sonnet', provider: 'anthropic', intelligence: 98, costRank: 3, routable: false, tools: true, aliases: ['sonnet-3.7', 'claude-3.7'] },
-    { model: 'claude-3-5-sonnet-20241022', provider: 'anthropic', intelligence: 95, costRank: 3, routable: false, tools: true, aliases: ['sonnet', 'claude-3.5-sonnet'] },
-    { model: 'claude-cli', provider: 'claude-cli', intelligence: 94, costRank: 1, routable: false, tools: true, aliases: ['claude'] },
-    { model: 'gpt-4o', provider: 'openai', intelligence: 92, costRank: 3, routable: true, tools: true, aliases: ['gpt4o'] },
-    { model: 'anthropic/claude-3.5-sonnet', provider: 'openrouter', intelligence: 95, costRank: 3, routable: false, tools: true, aliases: ['openrouter/claude'] },
-    { model: 'gemini-2.0-flash', provider: 'gemini', intelligence: 88, costRank: 1, routable: true, tools: true, aliases: ['gemini-flash', 'flash'] },
-    { model: 'gpt-4o-mini', provider: 'openai', intelligence: 80, costRank: 1, routable: true, tools: true, aliases: ['mini'] },
-    { model: 'gemini-3.1-pro-high', provider: 'antigravity', intelligence: 93, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.1-pro-low', provider: 'antigravity', intelligence: 90, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.8-flash-high', provider: 'antigravity', intelligence: 87, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.8-flash-medium', provider: 'antigravity', intelligence: 85, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.8-flash-low', provider: 'antigravity', intelligence: 83, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.7-flash-high', provider: 'antigravity', intelligence: 82, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.7-flash-medium', provider: 'antigravity', intelligence: 80, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.7-flash-low', provider: 'antigravity', intelligence: 78, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.6-flash-high', provider: 'antigravity', intelligence: 77, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.6-flash-medium', provider: 'antigravity', intelligence: 75, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gemini-3.6-flash-low', provider: 'antigravity', intelligence: 73, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'gpt-oss-120b-medium', provider: 'antigravity', intelligence: 70, costRank: 1, routable: true, tools: false, aliases: [] },
-    { model: 'claude-sonnet-4-6', provider: 'antigravity', intelligence: 95, costRank: 1, routable: false, tools: false, aliases: [] },
-    { model: 'claude-opus-4-6-thinking', provider: 'antigravity', intelligence: 97, costRank: 1, routable: false, tools: false, aliases: [] },
-    { model: 'local-engine', provider: 'local-engine', intelligence: 50, costRank: 0, routable: true, tools: true, aliases: ['local'] }
-  ];
-
   public getCatalog(): ModelEntry[] {
+    this.checkAndRefreshStale();
     return [...this.catalog];
   }
 
@@ -70,12 +100,19 @@ export class ChatRouter {
       if (mode === 'cheap') {
         if (available.includes('antigravity')) targetModel = 'gemini-3.8-flash-medium';
         else if (available.includes('gemini')) targetModel = 'gemini-2.0-flash';
-        else if (available.includes('openai')) targetModel = 'gpt-4o-mini';
-        else targetModel = 'local-engine';
+        else if (available.includes('openai')) {
+          targetModel = this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model === 'gpt-4o-mini')?.model
+            ?? this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model.includes('mini'))?.model
+            ?? this.catalog.filter((m) => m.provider === 'openai' && m.routable).sort((a, b) => a.costRank - b.costRank)[0]?.model
+            ?? 'gpt-4o-mini';
+        } else targetModel = 'local-engine';
       } else if (mode === 'smart') {
         if (available.includes('antigravity')) targetModel = 'gemini-3.1-pro-high';
-        else if (available.includes('openai')) targetModel = 'gpt-4o';
-        else if (available.includes('gemini')) targetModel = 'gemini-2.0-flash';
+        else if (available.includes('openai')) {
+          targetModel = this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model === 'gpt-4o')?.model
+            ?? this.catalog.filter((m) => m.provider === 'openai' && m.routable).sort((a, b) => b.intelligence - a.intelligence)[0]?.model
+            ?? 'gpt-4o';
+        } else if (available.includes('gemini')) targetModel = 'gemini-2.0-flash';
         else targetModel = 'local-engine';
       } else {
         // Auto: highest intelligence among real providers, nudged by distilled routing lessons
