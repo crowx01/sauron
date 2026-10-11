@@ -42,7 +42,13 @@ export class ChatRouter {
 
   private trivialClassification(): TaskClassification {
     return {
-      category: 'general',
+      // 'chitchat' is a sentinel distinct from the classifier's real categories
+      // (general|recon|exploit|codegen|audit|analysis) — route() keys its local-engine
+      // fast-path off this exact marker, not off generic low-planDepth/low-ambiguity
+      // scores, because plenty of real one-step tasks (e.g. "repeat hi 20 times") also
+      // classify as planDepth:1/low-ambiguity but need actual generation, not local-engine's
+      // canned keyword-matcher replies. See the 2026-10-11 regression this fixed.
+      category: 'chitchat',
       domain: 'general',
       planDepth: 1,
       ambiguity: 0,
@@ -407,11 +413,11 @@ Task: ${promptText}`;
       // Claude (anthropic/openrouter-claude/claude-cli) is never an auto cheap/smart pick —
       // policy: sauron never spends Claude tokens on its own initiative. Claude stays
       // reachable only via explicit `--model claude-cli` / `--model claude-3-7-sonnet` etc.
-      const isConfidentlyTrivial = !!classification
-        && !classification.forceEscalate
-        && classification.planDepth <= 1
-        && classification.ambiguity <= 0.2
-        && (classification.confidence ?? 0) >= 0.8;
+      // Keyed strictly off the 'chitchat' sentinel from trivialClassification() — NOT off
+      // generic low-planDepth/low-ambiguity scores. Plenty of real one-step tasks
+      // (e.g. "repeat hi 20 times") also classify as planDepth:1/low-ambiguity but need
+      // actual generation, not local-engine's canned keyword-matcher replies.
+      const isConfidentlyTrivial = classification?.category === 'chitchat';
 
       const shouldForceSmart = classification?.forceEscalate || mode === 'smart';
 
