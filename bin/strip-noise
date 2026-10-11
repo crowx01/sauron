@@ -1,85 +1,83 @@
-#!/usr/bin/env python3
-"""
-strip-noise - deterministic terminal-noise pruner for command output.
+#!/usr/bin/env node
+/**
+ * strip-noise - deterministic terminal-noise pruner for command output.
+ * High-performance Node/Bun replacement for legacy python script.
+ *
+ * Candidate #3 of the token-cutting roadmap. Removes non-semantic bloat from
+ * stdout/stderr before it reaches Claude's context:
+ *   * ANSI colour / cursor escape sequences
+ *   * carriage-return progress bars & spinners (keeps only the final state of a line)
+ *   * long stack traces / tracebacks - collapses the middle, keeping the top 2 and
+ *     bottom 2 frames plus the exception line (the root cause and the throw site).
+ */
+import fs from 'fs';
 
-Candidate #3 of the token-cutting roadmap. Removes non-semantic bloat from
-stdout/stderr before it reaches Claude's context:
-  * ANSI colour / cursor escape sequences
-  * carriage-return progress bars & spinners (keeps only the final state of a line)
-  * long stack traces / tracebacks - collapses the middle, keeping the top 2 and
-    bottom 2 frames plus the exception line (the root cause and the throw site).
+const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const OSC_REGEX = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
-Deterministic, 0 tokens, cannot refuse. Safe to wrap any noisy build/test/exploit
-command:  noisy-cmd 2>&1 | strip-noise
+const FRAME_REGEX = /^\s*(at\s+\S|File\s+"|\s+File\s+"|from\s+\S+\s+import|\s+at\s|Traceback|\s+#\d+\s|goroutine\s|\s+\.\.\.\/|\s+\S+\.(?:go|rb|php|java|rs|ts|js|py):\d+)/;
 
-Usage:
-    strip-noise [FILE ...]        # files, or stdin
-    pytest -q 2>&1 | strip-noise
-"""
-import sys, re
+function stripLineNoise(line) {
+  let cleaned = line.replace(ANSI_REGEX, '').replace(OSC_REGEX, '');
+  if (cleaned.includes('\r')) {
+    const parts = cleaned.split('\r');
+    cleaned = parts[parts.length - 1];
+  }
+  return cleaned;
+}
 
-ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")   # CSI sequences
-OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")  # OSC (titles etc.)
+function collapseTraces(lines, keep = 2) {
+  const out = [];
+  let run = [];
 
-# A stack-frame line across common languages/tools.
-FRAME = re.compile(
-    r"^\s*(at\s+\S|File\s+\"|\s+File\s+\"|from\s+\S+\s+import|"     # JS / Python
-    r"\s+at\s|Traceback|\s+#\d+\s|goroutine\s|\s+\.\.\./|"          # go / generic
-    r"\s+\S+\.(?:go|rb|php|java|rs|ts|js|py):\d+)"                   # file:line
-)
+  function flush() {
+    if (run.length > 2 * keep) {
+      out.push(...run.slice(0, keep));
+      out.push(`    ... ${run.length - 2 * keep} frames elided by strip-noise ...`);
+      out.push(...run.slice(-keep));
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  }
 
+  for (const ln of lines) {
+    if (FRAME_REGEX.test(ln)) {
+      run.push(ln);
+    } else {
+      if (run.length > 0) flush();
+      out.push(ln);
+    }
+  }
+  if (run.length > 0) flush();
+  return out;
+}
 
-def strip_line_noise(line):
-    line = ANSI.sub("", OSC.sub("", line))
-    # progress bars: keep only text after the last carriage return on the line
-    if "\r" in line:
-        line = line.split("\r")[-1]
-    return line
+async function main() {
+  const args = process.argv.slice(2);
+  let raw = '';
 
+  if (args.length > 0) {
+    for (const f of args) {
+      if (fs.existsSync(f)) {
+        raw += fs.readFileSync(f, 'utf-8');
+      }
+    }
+  } else {
+    raw = fs.readFileSync(0, 'utf-8');
+  }
 
-def collapse_traces(lines, keep=2):
-    """Collapse runs of >2*keep consecutive stack-frame lines."""
-    out, run = [], []
+  let data = raw.split('\n');
+  if (data.length > 0 && data[data.length - 1] === '') {
+    data.pop();
+  }
 
-    def flush():
-        if len(run) > 2 * keep:
-            out.extend(run[:keep])
-            out.append("    ... {} frames elided by strip-noise ...".format(len(run) - 2 * keep))
-            out.extend(run[-keep:])
-        else:
-            out.extend(run)
-        run.clear()
+  data = data.map(stripLineNoise);
+  data = collapseTraces(data);
+  process.stdout.write(data.join('\n') + (data.length ? '\n' : ''));
+}
 
-    for ln in lines:
-        if FRAME.search(ln):
-            run.append(ln)
-        else:
-            if run:
-                flush()
-            out.append(ln)
-    if run:
-        flush()
-    return out
-
-
-def main():
-    args = sys.argv[1:]
-    # split on \n only (NOT str.splitlines, which also breaks on \r and would
-    # defeat the progress-bar collapse that relies on \r staying inside a line).
-    if args:
-        raw = ""
-        for a in args:
-            with open(a, encoding="utf-8", errors="replace") as f:
-                raw += f.read()
-        data = raw.split("\n")
-    else:
-        data = sys.stdin.read().split("\n")
-    if data and data[-1] == "":
-        data.pop()
-    data = [strip_line_noise(l) for l in data]
-    data = collapse_traces(data)
-    sys.stdout.write("\n".join(data) + ("\n" if data else ""))
-
-
-if __name__ == "__main__":
-    main()
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

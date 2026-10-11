@@ -1,104 +1,107 @@
-#!/usr/bin/env python3
-"""
-sauron-normalize - deterministic dense-TSV normalizer for recon JSON-L.
+#!/usr/bin/env node
+/**
+ * sauron-normalize - deterministic dense-TSV normalizer for recon JSON-L.
+ * High-performance Node/Bun replacement for legacy python script.
+ *
+ * Candidate #1 of the token-cutting roadmap. Converts the verbose JSON-L emitted by
+ * httpx / subfinder / dnsx / naabu / nuclei into an ultra-dense TSV with a single
+ * header row, stripping the repeated JSON key names that dominate raw payloads.
+ * Runs BEFORE anything reaches Claude's context or a PAL model, so the saving is
+ * free (0 tokens, 0 latency, deterministic - it cannot refuse or hallucinate).
+ */
+import fs from 'fs';
+import readline from 'readline';
 
-Candidate #1 of the token-cutting roadmap. Converts the verbose JSON-L emitted by
-httpx / subfinder / dnsx / naabu / nuclei into an ultra-dense TSV with a single
-header row, stripping the repeated JSON key names that dominate raw payloads.
-Runs BEFORE anything reaches Claude's context or a PAL model, so the saving is
-free (0 tokens, 0 latency, deterministic - it cannot refuse or hallucinate).
+const SCHEMAS = [
+  // nuclei: findings are the highest-value signal
+  { name: 'nuclei', required: ['template-id'], cols: ['severity', 'template-id', 'matched-at', 'host', 'info.name'] },
+  // httpx: live-host fingerprint
+  { name: 'httpx', required: ['url', 'status_code'], cols: ['url', 'status_code', 'title', 'webserver', 'tech', 'content_length', 'host'] },
+  // dnsx: resolution
+  { name: 'dnsx', required: ['host', 'a'], cols: ['host', 'a', 'aaaa', 'cname'] },
+  // naabu: open ports
+  { name: 'naabu', required: ['port'], cols: ['host', 'ip', 'port'] },
+  // subfinder / generic host list
+  { name: 'subfinder', required: ['host'], cols: ['host', 'source'] },
+];
 
-Usage:
-    sauron-normalize [FILE ...]          # files, or '-'/no-arg for stdin
-    cat httpx.jsonl | sauron-normalize
-    sauron-normalize httpx.jsonl nuclei.jsonl
+function dig(obj, dotted) {
+  let cur = obj;
+  for (const part of dotted.split('.')) {
+    if (cur && typeof cur === 'object' && part in cur) {
+      cur = cur[part];
+    } else {
+      return '';
+    }
+  }
+  if (Array.isArray(cur)) return cur.join(',');
+  return cur == null ? '' : String(cur);
+}
 
-Each input line is one JSON object; the tool is auto-detected per line from the
-keys present, so mixed streams are fine. Lines that are not JSON are passed
-through unchanged (so it is safe to pipe arbitrary tool output through it).
+function pickSchema(obj) {
+  for (const schema of SCHEMAS) {
+    if (schema.required.every((k) => dig(obj, k) !== '')) {
+      return schema;
+    }
+  }
+  return null;
+}
 
-Design rule: NEVER drop a field that carries security signal. The schemas below
-keep host/url/status/tech/CVE/severity/matched-at; only structural JSON noise and
-purely cosmetic fields (timestamps, fonts, hashes nobody triages) are dropped.
-Add fields to a schema rather than widening the net, to keep output dense.
-"""
-import sys, json
+function cell(v) {
+  return v.replace(/\t/g, ' ').replace(/\r/g, ' ').replace(/\n/g, ' ');
+}
 
-# Per-tool column order. First matching schema (by required keys) wins.
-SCHEMAS = [
-    # nuclei: findings are the highest-value signal
-    ("nuclei", ["template-id"],
-     ["severity", "template-id", "matched-at", "host", "info.name"]),
-    # httpx: live-host fingerprint
-    ("httpx", ["url", "status_code"],
-     ["url", "status_code", "title", "webserver", "tech", "content_length", "host"]),
-    # dnsx: resolution
-    ("dnsx", ["host", "a"],
-     ["host", "a", "aaaa", "cname"]),
-    # naabu: open ports
-    ("naabu", ["port"],
-     ["host", "ip", "port"]),
-    # subfinder / generic host list
-    ("subfinder", ["host"],
-     ["host", "source"]),
-]
+async function processStream(stream) {
+  const printedHeader = new Set();
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
+  for await (const rawLine of rl) {
+    const line = rawLine.trim();
+    if (!line) continue;
 
-def dig(obj, dotted):
-    """Fetch a possibly-nested key like 'info.name'; '' if absent."""
-    cur = obj
-    for part in dotted.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
-        else:
-            return ""
-    if isinstance(cur, list):
-        return ",".join(str(x) for x in cur)
-    return "" if cur is None else str(cur)
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      process.stdout.write(rawLine + '\n');
+      continue;
+    }
 
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      process.stdout.write(rawLine + '\n');
+      continue;
+    }
 
-def pick_schema(obj):
-    for name, required, cols in SCHEMAS:
-        if all(dig(obj, k) != "" for k in required):
-            return name, cols
-    return None, None
+    const schema = pickSchema(obj);
+    if (!schema) {
+      process.stdout.write(rawLine + '\n');
+      continue;
+    }
 
+    if (!printedHeader.has(schema.name)) {
+      process.stdout.write(`# ${schema.name}\t${schema.cols.join('\t')}\n`);
+      printedHeader.add(schema.name);
+    }
 
-def cell(v):
-    # TSV-safe: no tabs/newlines inside a cell.
-    return v.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    const row = schema.cols.map((c) => cell(dig(obj, c))).join('\t');
+    process.stdout.write(row + '\n');
+  }
+}
 
+async function main() {
+  const args = process.argv.slice(2).filter((a) => a !== '-');
+  if (args.length === 0) {
+    await processStream(process.stdin);
+  } else {
+    for (const file of args) {
+      if (fs.existsSync(file)) {
+        await processStream(fs.createReadStream(file, { encoding: 'utf-8' }));
+      }
+    }
+  }
+}
 
-def main():
-    args = [a for a in sys.argv[1:] if a != "-"]
-    streams = [open(a, encoding="utf-8", errors="replace") for a in args] if args else [sys.stdin]
-    printed_header = {}   # tool -> True once its header is emitted
-    out = sys.stdout
-    for stream in streams:
-        for line in stream:
-            line = line.rstrip("\n")
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-            except (ValueError, TypeError):
-                out.write(line + "\n")     # pass through non-JSON untouched
-                continue
-            if not isinstance(obj, dict):
-                out.write(line + "\n")
-                continue
-            tool, cols = pick_schema(obj)
-            if not tool:
-                out.write(line + "\n")     # unknown schema: don't lose data
-                continue
-            if tool not in printed_header:
-                out.write("# {}\t{}\n".format(tool, "\t".join(cols)))
-                printed_header[tool] = True
-            out.write("\t".join(cell(dig(obj, c)) for c in cols) + "\n")
-    for s in streams:
-        if s is not sys.stdin:
-            s.close()
-
-
-if __name__ == "__main__":
-    main()
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

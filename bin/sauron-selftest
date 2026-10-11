@@ -30,25 +30,12 @@ check_script_syntax() {
       else
         fail "bash syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
       fi ;;
-    "#!"*python*)
-      if command -v python3 >/dev/null 2>&1; then
-        # py_compile without side effects: write bytecode to a temp dir we throw away.
-        local _pyc_tmp; _pyc_tmp=$(mktemp -d)
-        if PYTHONPYCACHEPREFIX="$_pyc_tmp" python3 -m py_compile "$f" 2>/tmp/sauron-selftest.err; then
-          pass "python syntax: $rel"
-        else
-          fail "python syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
-        fi
-        rm -rf "$_pyc_tmp"
-      else
-        printf '  %s!%s python3 not installed; skipping %s\n' "$YLW" "$RST" "$rel"
-      fi ;;
-    "#!"*node*)
+    "#!"*node*|"#!"*bun*)
       if command -v node >/dev/null 2>&1; then
         if node --check "$f" 2>/tmp/sauron-selftest.err; then
-          pass "node syntax: $rel"
+          pass "node/bun syntax: $rel"
         else
-          fail "node syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
+          fail "node/bun syntax: $rel -- $(cat /tmp/sauron-selftest.err)"
         fi
       fi ;;
     *)
