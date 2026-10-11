@@ -44,6 +44,17 @@ export class AntigravityProviderClient implements ProviderClient {
     return this.availableCache;
   }
 
+  // Hard ceiling for a single agy call. agy cold-spawns in 2-5s and normal generation finishes
+  // in 30-45s; anything past this is a hung backend connection/gateway stall, not a slow but
+  // live model, and should fail fast so the router's circuit-breaker can fall through to the
+  // next provider instead of hanging forever. Debated with antigravity itself 2026-10-11 after
+  // a real case hung 7+ minutes wall-clock on only ~10s of actual CPU time.
+  private static readonly HARD_TIMEOUT_MS = 90_000;
+  // agy buffers its whole answer and emits nothing on stdout until it's fully done, so without
+  // this the TUI sits frozen with zero feedback for the entire call. Yield a synthetic "still
+  // waiting" delta periodically until real output starts arriving.
+  private static readonly HEARTBEAT_INTERVAL_MS = 5_000;
+
   public async *streamResponse(
     messages: Message[],
     model: string,
@@ -60,6 +71,12 @@ export class AntigravityProviderClient implements ProviderClient {
     prompt += 'Assistant:';
 
     let proc: ReturnType<typeof spawn> | undefined;
+    let timedOut = false;
+    const hardTimeout = setTimeout(() => {
+      timedOut = true;
+      if (proc && proc.exitCode === null && !proc.killed) proc.kill('SIGKILL');
+    }, AntigravityProviderClient.HARD_TIMEOUT_MS);
+
     const kill = () => {
       if (proc && proc.exitCode === null && !proc.killed) proc.kill('SIGKILL');
     };
@@ -75,15 +92,53 @@ export class AntigravityProviderClient implements ProviderClient {
       proc.stderr?.on('data', (c) => (stderr += c.toString()));
 
       let buffer = '';
+      let gotFirstChunk = false;
+      let elapsedHeartbeats = 0;
+
       if (proc.stdout) {
-        for await (const chunk of proc.stdout) {
-          const text = chunk.toString();
+        const stdoutIterator = proc.stdout[Symbol.asyncIterator]();
+        // IMPORTANT: a Node readable's async iterator supports exactly one pending next() call
+        // at a time. Calling .next() again on every heartbeat tick (the original version of this
+        // fix) started a second concurrent read before the first resolved, silently dropping
+        // real chunks on timing-sensitive cases (caught by tests/scenarios.test.ts Scenario 2
+        // going empty). Keep the SAME pending promise across heartbeat ticks instead -- only
+        // request a new one once the current one actually resolves.
+        let pending: ReturnType<typeof stdoutIterator.next> | null = null;
+        while (true) {
+          if (!pending) pending = stdoutIterator.next();
+          const heartbeatTimer = new Promise<'heartbeat'>((resolve) =>
+            setTimeout(() => resolve('heartbeat'), AntigravityProviderClient.HEARTBEAT_INTERVAL_MS)
+          );
+          const result = await Promise.race([pending, heartbeatTimer]);
+
+          if (result === 'heartbeat') {
+            if (signal?.aborted || timedOut) break;
+            if (!gotFirstChunk) {
+              elapsedHeartbeats++;
+              yield {
+                delta: '',
+                modelUsed: targetModel,
+                providerUsed: 'antigravity',
+                statusNote: `Waiting for Antigravity response (${elapsedHeartbeats * AntigravityProviderClient.HEARTBEAT_INTERVAL_MS / 1000}s)...`
+              };
+            }
+            continue;
+          }
+
+          pending = null;
+          if (result.done) break;
+          gotFirstChunk = true;
+          const text = result.value.toString();
           buffer += text;
           yield { delta: text, modelUsed: targetModel, providerUsed: 'antigravity' };
         }
       }
 
       if (signal?.aborted) return;
+      if (timedOut) {
+        yield { error: `Antigravity error: timed out after ${AntigravityProviderClient.HARD_TIMEOUT_MS / 1000}s with no response (likely a hung backend connection)`, providerUsed: 'antigravity', modelUsed: targetModel };
+        return;
+      }
       if (!buffer.trim()) {
         yield { error: `Antigravity error: ${stderr.trim() || 'Empty output'}`, providerUsed: 'antigravity', modelUsed: targetModel };
       }
@@ -91,6 +146,7 @@ export class AntigravityProviderClient implements ProviderClient {
       if (signal?.aborted) return;
       yield { error: `Antigravity execution failed: ${err.message}`, providerUsed: 'antigravity', modelUsed: targetModel };
     } finally {
+      clearTimeout(hardTimeout);
       signal?.removeEventListener('abort', kill);
       kill();
     }
