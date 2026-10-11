@@ -201,6 +201,59 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
   });
 
   // -------------------------------------------------------------
+  // ITEM 1.8: Semantic Action-Graph Cache with SQLite & Jaccard
+  // -------------------------------------------------------------
+  test('Item 1.8: templatePrompt normalizes slots and computes Jaccard similarity', () => {
+    const { templatePrompt, jaccardSimilarity } = require('../src/router/action_cache');
+
+    const t1 = templatePrompt('scan 192.168.1.5 on port 80');
+    const t2 = templatePrompt('scan 10.0.0.1 on port 443');
+
+    expect(t1.skeleton).toBe('scan <slot:ip> on port <slot:number>');
+    expect(t2.skeleton).toBe('scan <slot:ip> on port <slot:number>');
+    expect(jaccardSimilarity(t1.skeleton, t2.skeleton)).toBe(1.0);
+
+    const t3 = templatePrompt('delete file /tmp/test.txt');
+    expect(jaccardSimilarity(t1.skeleton, t3.skeleton)).toBeLessThan(0.5);
+  });
+
+  test('Item 1.9: actionCache stores, looks up on >= 0.90 similarity, and replays sequence', async () => {
+    const { actionCache } = require('../src/router/action_cache');
+    actionCache.clear();
+
+    const sampleDAG = [
+      { id: '1', action: 'bash', args: { command: 'echo "cached output"' }, dependsOn: [] }
+    ];
+
+    actionCache.store({
+      prompt: 'enumerate hosts at 192.168.1.1',
+      providerUsed: 'test-prov',
+      modelUsed: 'test-model',
+      dagOrToolSequence: sampleDAG
+    });
+
+    // Same skeleton with different IP parameter
+    const lookup = actionCache.lookup('enumerate hosts at 10.0.0.99');
+    expect(lookup.hit).toBe(true);
+    expect(lookup.similarity).toBeGreaterThanOrEqual(0.90);
+    expect(lookup.entry?.providerUsed).toBe('test-prov');
+
+    // Test dispatch with cache hit
+    const userMsgs: Message[] = [
+      { id: 'msg1', role: 'user', content: 'enumerate hosts at 10.0.0.99', timestamp: Date.now() }
+    ];
+
+    const deltas: string[] = [];
+    for await (const chunk of chatRouter.dispatch(userMsgs)) {
+      if (chunk.delta) deltas.push(chunk.delta);
+    }
+
+    const fullDelta = deltas.join('');
+    expect(fullDelta).toContain('Action Cache Hit');
+    expect(fullDelta).toContain('cached output');
+  });
+
+  // -------------------------------------------------------------
   // ITEM 2: Extended LessonStore Ledger & Recency-Weighted Bias
   // -------------------------------------------------------------
   test('Item 2.1: LessonStore tracks fuller ledger with latency, costRank, and taskCategory', () => {

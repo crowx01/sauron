@@ -10,9 +10,10 @@ import {
 } from './catalog_fetch';
 import { computeBlastRadius, BlastRadiusResult } from './blast_radius';
 import { requestPlanDAG, executePlanDAG, isNonLinearTask, PlanNode, DAGExecutionResult } from './plan_dag';
+import { actionCache, ActionCache, templatePrompt } from './action_cache';
 
-export { STATIC_CATALOG, computeBlastRadius, requestPlanDAG, executePlanDAG, isNonLinearTask };
-export type { BlastRadiusResult, PlanNode, DAGExecutionResult };
+export { STATIC_CATALOG, computeBlastRadius, requestPlanDAG, executePlanDAG, isNonLinearTask, actionCache };
+export type { BlastRadiusResult, PlanNode, DAGExecutionResult, ActionCache };
 
 export class ChatRouter {
   public defaultModel = 'gemini-3.1-pro-high';
@@ -535,6 +536,34 @@ Task: ${promptText}`;
     // of scope for this pass and flagged for a future phase. Current coordination is handled
     // via circuit-breaker escalation context propagation across chain targets in dispatch().
 
+    const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+
+    // 4. Semantic action-graph cache check:
+    // Check cache for similarity >= 0.90 AND same param slot types; if hit, replay cached sequence directly,
+    // skip model call entirely, log a cache-hit lesson entry.
+    if (promptText) {
+      const cacheResult = actionCache.lookup(promptText);
+      if (cacheResult.hit && cacheResult.entry && cacheResult.instantiatedSequence) {
+        lessonStore.record({
+          model: cacheResult.entry.modelUsed,
+          provider: cacheResult.entry.providerUsed,
+          success: true,
+          latencyMs: 1,
+          taskCategory: options.taskCategory || classification?.category || 'cache-hit',
+          costRank: 0
+        });
+
+        yield { delta: `[Action Cache Hit]: Replaying cached execution sequence (similarity: ${(cacheResult.similarity! * 100).toFixed(0)}%)...\n`, providerUsed: 'local-engine' };
+
+        if (Array.isArray(cacheResult.instantiatedSequence)) {
+          yield* executePlanDAG(cacheResult.instantiatedSequence, options);
+        } else if (typeof cacheResult.instantiatedSequence === 'string') {
+          yield { delta: cacheResult.instantiatedSequence, providerUsed: 'local-engine', finishReason: 'stop' };
+        }
+        return;
+      }
+    }
+
     // 3. Plan/Execute split for 'auto' smart-tier dispatch:
     // If task is classified as multi-step / non-linear, request strict JSON plan DAG from smart-tier model
     // and execute DAG nodes in dependency order via local-engine toolBelt.
@@ -542,13 +571,25 @@ Task: ${promptText}`;
     const isNonLinear = classification ? isNonLinearTask(classification.planDepth, classification.category) : false;
 
     if (mode === 'auto' && isSmartTierTarget && isNonLinear) {
-      const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
       const smartClient = providerRegistry.get(primaryProvider);
 
       if (smartClient && smartClient.isAvailable() && promptText) {
         const dagPlan = await requestPlanDAG(smartClient, primaryModel, promptText, options);
         if (dagPlan && dagPlan.length > 0) {
-          yield* executePlanDAG(dagPlan, options);
+          const dagExecution = executePlanDAG(dagPlan, options);
+          let dagOutput = '';
+          for await (const chunk of dagExecution) {
+            if (chunk.delta) dagOutput += chunk.delta;
+            yield chunk;
+          }
+
+          // Cache successfully completed DAG plan
+          actionCache.store({
+            prompt: promptText,
+            providerUsed: primaryProvider,
+            modelUsed: primaryModel,
+            dagOrToolSequence: dagPlan
+          });
           return;
         }
       }
@@ -570,6 +611,7 @@ Task: ${promptText}`;
       // Pass forward bundled failure summary as extra escalation context to fallback targets
       const targetMessages = this.buildEscalationMessages(messages, failureHistory);
 
+      let collectedOutput = '';
       for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_TARGET; attempt++) {
         if (signal?.aborted) return;
         try {
@@ -579,6 +621,7 @@ Task: ${promptText}`;
               failure = chunk.error;
               break;
             }
+            if (chunk.delta) collectedOutput += chunk.delta;
             hasOutput = true;
             yield chunk;
           }
@@ -609,7 +652,17 @@ Task: ${promptText}`;
       if (signal?.aborted) return;
       if (hasOutput) {
         // Never splice a fallback's answer onto a half-delivered one
-        if (failure) yield { error: `Stream interrupted: ${failure}`, providerUsed: target.provider, finishReason: 'error' };
+        if (failure) {
+          yield { error: `Stream interrupted: ${failure}`, providerUsed: target.provider, finishReason: 'error' };
+        } else if (promptText) {
+          // On clean successful dispatch completion, store in action cache
+          actionCache.store({
+            prompt: promptText,
+            providerUsed: target.provider,
+            modelUsed: target.model,
+            dagOrToolSequence: collectedOutput
+          });
+        }
         return;
       }
 
