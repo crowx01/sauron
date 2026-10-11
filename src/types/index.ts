@@ -33,6 +33,14 @@ export interface ModelEntry {
   aliases: string[];
 }
 
+export interface TaskClassification {
+  category: string;
+  domain?: string;
+  planDepth: number;
+  ambiguity: number;
+  confidence?: number;
+}
+
 export interface RouterOptions {
   model?: string;
   mode?: 'auto' | 'cheap' | 'smart' | 'delegate';
@@ -42,6 +50,8 @@ export interface RouterOptions {
   signal?: AbortSignal;
   /** Free-form bucket (e.g. 'recon', 'codegen') used to scope routing lessons. Defaults to 'general'. */
   taskCategory?: string;
+  sessionId?: string;
+  classification?: TaskClassification;
 }
 
 export interface StreamChunk {
