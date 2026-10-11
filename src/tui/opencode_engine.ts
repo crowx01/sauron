@@ -3,7 +3,7 @@
  * Full OpenCode Layout Engine: Split Panes, Modals, Themes & Synchronized Render Loop
  */
 
-import { themeStore, visibleLen } from './themes';
+import { themeStore, fg, fgBg, bold, dim, padToWidth, visibleLen, ThemeTokens } from './themes';
 import { keymapRegistry, cyclePromptMode } from './keymaps';
 import { modalManager } from './modals';
 import { SessionTabBar, SidebarPane, MessageCardRenderer, PromptComposer } from './views';
@@ -11,6 +11,26 @@ import { sessionStore } from '../session';
 import { chatRouter } from '../router';
 import { toolBelt } from '../tools';
 import { Message, StreamChunk } from '../types';
+
+export interface SlashCommandDef {
+  cmd: string;
+  usage: string;
+  desc: string;
+  badge: string;
+}
+
+export const ALL_SLASH_COMMANDS: SlashCommandDef[] = [
+  { cmd: '/model', usage: '/model [name]', desc: 'Switch active AI model catalog picker', badge: 'MODEL' },
+  { cmd: '/theme', usage: '/theme [name]', desc: 'Change TUI color theme palette (34 themes)', badge: 'THEME' },
+  { cmd: '/sessions', usage: '/sessions [clear]', desc: 'Browse or clear all saved sessions', badge: 'SESSION' },
+  { cmd: '/clear', usage: '/clear [all]', desc: 'Clear active session or all saved sessions', badge: 'CLEAR' },
+  { cmd: '/compact', usage: '/compact', desc: 'Compact context memory & save JSONL archive', badge: 'COMPACT' },
+  { cmd: '/palette', usage: '/palette', desc: 'Open fuzzy command palette dialog', badge: 'PALETTE' },
+  { cmd: '/keys', usage: '/keys', desc: 'View keyboard shortcuts & leader bindings', badge: 'HELP' },
+  { cmd: '/new', usage: '/new', desc: 'Start a fresh conversation session', badge: 'NEW' },
+  { cmd: '/quit', usage: '/quit', desc: 'Exit Sauron TUI cleanly', badge: 'EXIT' },
+  { cmd: '/help', usage: '/help', desc: 'Show interactive help reference', badge: 'HELP' },
+];
 
 export class OpenCodeEngine {
   private width = 120;
@@ -23,6 +43,7 @@ export class OpenCodeEngine {
   private promptHistory: string[] = [];
   private isBusy = false;
   private sidebarVisible = true;
+  private slashSelectedIndex = 0;
 
   private tabBar = new SessionTabBar();
   private sidebar = new SidebarPane();
@@ -86,6 +107,15 @@ export class OpenCodeEngine {
     process.exit(0);
   }
 
+  private getFilteredSlashCommands(): SlashCommandDef[] {
+    if (!this.promptBuffer.startsWith('/')) return [];
+    const typed = this.promptBuffer.slice(1).trim().split(/\s+/)[0].toLowerCase();
+    if (!typed) return ALL_SLASH_COMMANDS;
+    return ALL_SLASH_COMMANDS.filter(
+      (c) => c.cmd.slice(1).startsWith(typed) || c.cmd.toLowerCase().includes(typed) || c.desc.toLowerCase().includes(typed)
+    );
+  }
+
   private handleInput(str: string) {
     const key = this.parseKey(str);
 
@@ -94,6 +124,9 @@ export class OpenCodeEngine {
       const res = cyclePromptMode(this.promptBuffer, this.cursorOffset);
       this.promptBuffer = res.text;
       this.cursorOffset = res.pos;
+      if (this.promptBuffer.startsWith('/')) {
+        this.slashSelectedIndex = 0;
+      }
       this.render();
       return;
     }
@@ -139,34 +172,81 @@ export class OpenCodeEngine {
       return;
     }
 
-    // 4. Prompt History Navigation (Up/Down)
-    if (key.name === 'up' && this.promptHistory.length > 0) {
-      if (this.historyIndex < this.promptHistory.length - 1) {
-        this.historyIndex++;
-        this.promptBuffer = this.promptHistory[this.promptHistory.length - 1 - this.historyIndex];
-        this.cursorOffset = this.promptBuffer.length;
-      }
-      this.render();
-      return;
-    }
+    // 4. Slash Command Palette Controls (when buffer starts with /)
+    if (this.promptBuffer.startsWith('/')) {
+      const filtered = this.getFilteredSlashCommands();
 
-    if (key.name === 'down') {
-      if (this.historyIndex > 0) {
-        this.historyIndex--;
-        this.promptBuffer = this.promptHistory[this.promptHistory.length - 1 - this.historyIndex];
-      } else if (this.historyIndex === 0) {
-        this.historyIndex = -1;
+      if (key.name === 'up') {
+        this.slashSelectedIndex = Math.max(0, this.slashSelectedIndex - 1);
+        this.render();
+        return;
+      }
+
+      if (key.name === 'down') {
+        this.slashSelectedIndex = Math.min(Math.max(0, filtered.length - 1), this.slashSelectedIndex + 1);
+        this.render();
+        return;
+      }
+
+      if (key.name === 'tab') {
+        if (filtered[this.slashSelectedIndex]) {
+          this.promptBuffer = filtered[this.slashSelectedIndex].cmd + ' ';
+          this.cursorOffset = this.promptBuffer.length;
+        }
+        this.render();
+        return;
+      }
+
+      if (key.name === 'escape') {
         this.promptBuffer = '';
+        this.cursorOffset = 0;
+        this.render();
+        return;
       }
-      this.cursorOffset = this.promptBuffer.length;
-      this.render();
-      return;
+    } else {
+      // Prompt History Navigation (Up/Down) when NOT in slash command mode
+      if (key.name === 'up' && this.promptHistory.length > 0) {
+        if (this.historyIndex < this.promptHistory.length - 1) {
+          this.historyIndex++;
+          this.promptBuffer = this.promptHistory[this.promptHistory.length - 1 - this.historyIndex];
+          this.cursorOffset = this.promptBuffer.length;
+        }
+        this.render();
+        return;
+      }
+
+      if (key.name === 'down') {
+        if (this.historyIndex > 0) {
+          this.historyIndex--;
+          this.promptBuffer = this.promptHistory[this.promptHistory.length - 1 - this.historyIndex];
+        } else if (this.historyIndex === 0) {
+          this.historyIndex = -1;
+          this.promptBuffer = '';
+        }
+        this.cursorOffset = this.promptBuffer.length;
+        this.render();
+        return;
+      }
     }
 
-    // 5. Cursor movement & deletion
+    // 5. Cursor movement & deletion (supports Word Navigation)
     if (key.name === 'left' || key.name === 'right') {
-      const delta = key.name === 'left' ? -1 : 1;
-      this.cursorOffset = Math.max(0, Math.min(this.promptBuffer.length, this.cursorOffset + delta));
+      if (key.word) {
+        if (key.name === 'left') {
+          let c = this.cursorOffset;
+          while (c > 0 && /\s/.test(this.promptBuffer[c - 1])) c--;
+          while (c > 0 && !/\s/.test(this.promptBuffer[c - 1])) c--;
+          this.cursorOffset = c;
+        } else {
+          let c = this.cursorOffset;
+          while (c < this.promptBuffer.length && !/\s/.test(this.promptBuffer[c])) c++;
+          while (c < this.promptBuffer.length && /\s/.test(this.promptBuffer[c])) c++;
+          this.cursorOffset = c;
+        }
+      } else {
+        const delta = key.name === 'left' ? -1 : 1;
+        this.cursorOffset = Math.max(0, Math.min(this.promptBuffer.length, this.cursorOffset + delta));
+      }
       this.render();
       return;
     }
@@ -176,6 +256,9 @@ export class OpenCodeEngine {
       if (c > 0) {
         this.promptBuffer = this.promptBuffer.slice(0, c - 1) + this.promptBuffer.slice(c);
         this.cursorOffset = c - 1;
+        if (this.promptBuffer.startsWith('/')) {
+          this.slashSelectedIndex = 0;
+        }
       }
       this.render();
       return;
@@ -194,16 +277,34 @@ export class OpenCodeEngine {
     // 6. Submit Prompt (Enter)
     if (key.name === 'return' && !key.shift && !key.ctrl && !key.alt) {
       if (this.promptBuffer.trim().length > 0) {
-        const userText = this.promptBuffer;
+        let userText = this.promptBuffer.trim();
+
+        if (userText.startsWith('/')) {
+          const filtered = this.getFilteredSlashCommands();
+          const rawCmd = userText.split(/\s+/)[0];
+          const isExact = ALL_SLASH_COMMANDS.some((c) => c.cmd === rawCmd.toLowerCase());
+
+          if (!isExact && filtered[this.slashSelectedIndex]) {
+            const restArgs = userText.slice(rawCmd.length).trim();
+            userText = filtered[this.slashSelectedIndex].cmd + (restArgs ? ' ' + restArgs : '');
+          }
+
+          this.promptHistory.push(userText);
+          this.historyIndex = -1;
+          this.promptBuffer = '';
+          this.cursorOffset = 0;
+          this.scrollOffset = 0;
+
+          this.handleSlashCommand(userText);
+          this.render();
+          return;
+        }
+
         this.promptHistory.push(userText);
         this.historyIndex = -1;
         this.promptBuffer = '';
         this.cursorOffset = 0;
         this.scrollOffset = 0;
-        if (userText.trim().startsWith('/') && this.handleSlashCommand(userText.trim())) {
-          this.render();
-          return;
-        }
         this.enqueueUserPrompt(userText);
       }
       return;
@@ -218,7 +319,14 @@ export class OpenCodeEngine {
 
     // Plain text typing (also handles pasted chunks)
     if (!key.ctrl && !key.alt && /^[\x20-\x7e\u00a0-\uffff]+$/.test(str)) {
+      if (this.promptBuffer === '' && str === '/') {
+        this.slashSelectedIndex = 0;
+      }
       this.insertAtCursor(str);
+      if (this.promptBuffer.startsWith('/')) {
+        const filtered = this.getFilteredSlashCommands();
+        this.slashSelectedIndex = Math.min(this.slashSelectedIndex, Math.max(0, filtered.length - 1));
+      }
       this.render();
     }
   }
@@ -297,7 +405,7 @@ export class OpenCodeEngine {
         this.stop();
         return true;
       case '/help':
-        this.notify('Commands: /model [name] /theme [name] /sessions /palette /keys /new /clear /compact /exit  (ctrl+p palette, ctrl+x leader)');
+        this.notify('Commands: /model [name] /theme [name] /sessions [clear] /clear [all] /compact /palette /keys /new /quit /help');
         return true;
       default:
         this.notify(`Unknown command ${cmd}. Type /help.`);
@@ -351,7 +459,7 @@ export class OpenCodeEngine {
 
     this.isBusy = true;
     if (!this.spinnerTimer) {
-      this.spinnerTimer = setInterval(() => this.render(), 100);
+      this.spinnerTimer = setInterval(() => this.render(), 80);
     }
 
     const currentPrompt = this.promptQueue.shift();
@@ -360,7 +468,7 @@ export class OpenCodeEngine {
     try {
       let assistantText = '';
       const activeSession = sessionStore.getActiveSession();
-      
+
       for await (const chunk of chatRouter.dispatch(activeSession.messages)) {
         if (chunk.delta) {
           assistantText += chunk.delta;
@@ -380,11 +488,54 @@ export class OpenCodeEngine {
         this.spinnerTimer = null;
       }
       this.render();
-      // Drain next item in queue!
       setImmediate(() => this.drainQueue());
     }
   }
 
+  public renderSlashOverlay(width: number, t: ThemeTokens): string[] {
+    const filtered = this.getFilteredSlashCommands();
+    const boxW = Math.min(width - 6, 88);
+    const lines: string[] = [];
+
+    const borderChar = '─';
+    const topBar = fg(t.border.focus, `┌${borderChar.repeat(boxW - 2)}┐`);
+    const bottomBar = fg(t.border.focus, `└${borderChar.repeat(boxW - 2)}┘`);
+
+    lines.push(topBar);
+
+    const titleText = bold(fg(t.text.action, ` ⚡ SLASH COMMAND PALETTE (${filtered.length} matched) — Up/Down navigate, Tab complete, Enter run `));
+    lines.push(`│ ${padToWidth(titleText, boxW - 4)} │`);
+    lines.push(fg(t.border.focus, `├${borderChar.repeat(boxW - 2)}┤`));
+
+    this.slashSelectedIndex = Math.min(this.slashSelectedIndex, Math.max(0, filtered.length - 1));
+    const visibleCount = Math.min(6, filtered.length);
+
+    for (let i = 0; i < visibleCount; i++) {
+      const item = filtered[i];
+      const isSelected = i === this.slashSelectedIndex;
+
+      const prefix = isSelected ? '▶ ' : '  ';
+      const cmdStr = item.cmd.padEnd(12);
+      const usageStr = item.usage.padEnd(20);
+      const descW = Math.max(10, boxW - 4 - 2 - 12 - 20 - 10);
+      const descStr = item.desc.slice(0, descW).padEnd(descW);
+      const badgeStr = fgBg(t.text.base, t.background.badge, ` [${item.badge}] `);
+
+      const rowContent = `${prefix}${cmdStr}${usageStr}${descStr}${badgeStr}`;
+      if (isSelected) {
+        lines.push(`│ ${padToWidth(fgBg(t.text.base, t.background.selection, bold(rowContent)), boxW - 4)} │`);
+      } else {
+        lines.push(`│ ${padToWidth(fg(t.text.base, rowContent), boxW - 4)} │`);
+      }
+    }
+
+    if (filtered.length === 0) {
+      lines.push(`│ ${padToWidth(fg(t.text.muted, '  No matching slash command. Type /help for options.'), boxW - 4)} │`);
+    }
+
+    lines.push(bottomBar);
+    return lines;
+  }
 
   public render() {
     const t = themeStore.getTheme();
@@ -406,7 +557,6 @@ export class OpenCodeEngine {
 
     const sidebarLines = isSidebarVisible ? this.sidebar.render(sidebarW, mainH, t) : [];
 
-    
     // Main Transcript Scrollbox with scrollOffset support
     const transcriptLines: string[] = [];
     for (const msg of activeSession.messages) {
@@ -439,6 +589,19 @@ export class OpenCodeEngine {
     const composerLines = this.composer.renderPrompt(this.promptBuffer, this.cursorOffset, width, this.isBusy, t);
     frame += composerLines.join('\n');
 
+    // Overlay: Slash Command Palette Overlay (if buffer starts with /)
+    if (modalManager.getActiveModal() === 'none' && this.promptBuffer.startsWith('/')) {
+      const slashLines = this.renderSlashOverlay(width, t);
+      const startRow = Math.max(1, height - 6 - slashLines.length);
+      const slashW = visibleLen(slashLines[0]);
+      const startCol = Math.floor((width - slashW) / 2);
+      for (let r = 0; r < slashLines.length; r++) {
+        const row = startRow + r + 1;
+        const col = startCol + 1;
+        frame += `\x1b[${row};${col}H${slashLines[r]}`;
+      }
+    }
+
     // Overlay: Active Modal (if open)
     const modalLines = modalManager.render(width, height);
     if (modalLines.length > 0) {
@@ -457,10 +620,14 @@ export class OpenCodeEngine {
     process.stdout.write(frame);
   }
 
-  private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean } {
+  private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean; word?: boolean } {
     // SGR Mouse wheel scroll decoding (<64; = Up, <65; = Down) or PageUp/PageDown
     if (str.includes('<64;') || str.startsWith('\x1b[<64') || str === '\x1b[5~') return { name: 'pageup' };
     if (str.includes('<65;') || str.startsWith('\x1b[<65') || str === '\x1b[6~') return { name: 'pagedown' };
+
+    // Tab & Backtab (Shift+Tab)
+    if (str === '\x1b[Z' || str === '\x1b[9;2u') return { name: 'backtab', shift: true };
+    if (str === '\t' || str === '\x09') return { name: 'tab' };
 
     // Ctrl+<letter> arrives as a single control byte (0x01-0x1a), excluding tab/enter/backspace
     if (str.length === 1) {
@@ -477,6 +644,10 @@ export class OpenCodeEngine {
       }
     }
 
+    // Word navigation (Ctrl+Left / Alt+Left / Ctrl+Right / Alt+Right)
+    if (str === '\x1b[1;5D' || str === '\x1b[1;3D' || str === '\x1bb') return { name: 'left', word: true };
+    if (str === '\x1b[1;5C' || str === '\x1b[1;3C' || str === '\x1bf') return { name: 'right', word: true };
+
     if (str === '\x1b[A' || str === '\x1bOA') return { name: 'up' };
     if (str === '\x1b[B' || str === '\x1bOB') return { name: 'down' };
     if (str === '\x1b[C' || str === '\x1bOC') return { name: 'right' };
@@ -484,7 +655,7 @@ export class OpenCodeEngine {
     if (str === '\x1b[3~') return { name: 'delete' };
     if (str === '\x1b[H' || str === '\x1bOH' || str === '\x1b[1~' || str === '\x1b[7~') return { name: 'home' };
     if (str === '\x1b[F' || str === '\x1bOF' || str === '\x1b[4~' || str === '\x1b[8~') return { name: 'end' };
-    
+
     if (str === '\r' || str === '\n') return { name: 'return' };
     if (str === '\x7f' || str === '\x08') return { name: 'backspace' };
     if (str === '\x1b') return { name: 'escape' };
@@ -493,9 +664,7 @@ export class OpenCodeEngine {
     if (str === '\x1bOQ') return { name: 'f2' };
     if (str === '\x1bOR') return { name: 'f3' };
     if (str === '\x1bOS') return { name: 'f4' };
-    
-    // Check shift+return and shift+tab (backtab)
-    if (str === '\x1b[Z' || str === '\x1b[9;2u') return { name: 'backtab', shift: true };
+
     if (str === '\x1b[13;2u' || str === '\x1b\r') return { name: 'return', shift: true };
 
     return { name: str };
