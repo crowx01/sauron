@@ -39,6 +39,9 @@ export interface TaskClassification {
   planDepth: number;
   ambiguity: number;
   confidence?: number;
+  is_ambiguous?: boolean;
+  schema_conformant?: boolean;
+  forceEscalate?: boolean;
 }
 
 export interface RouterOptions {

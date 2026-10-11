@@ -136,12 +136,28 @@ export class ChatRouter {
       cheapModel = 'gemini-3.8-flash-low';
     }
 
+    // Fallback classification representing forced escalation to smart tier
+    const escalationFallback: TaskClassification = {
+      category: 'general',
+      domain: 'general',
+      planDepth: 8,
+      ambiguity: 0.9,
+      confidence: 0.1,
+      is_ambiguous: true,
+      schema_conformant: false,
+      forceEscalate: true
+    };
+
     if (!cheapProvider || !cheapModel) {
       return null;
     }
 
     const client = providerRegistry.get(cheapProvider);
     if (!client) return null;
+
+    if (options.signal?.aborted) {
+      return null;
+    }
 
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -150,20 +166,25 @@ export class ChatRouter {
     }
 
     const promptText = prompt.trim().slice(0, 500);
-    const classificationPrompt = `Classify this user task. Respond with ONLY a compact raw JSON object (no markdown, no backticks, no explanations):
-{"category":"<general|recon|exploit|codegen|audit|analysis>","planDepth":<integer 1-10>,"ambiguity":<float 0.0-1.0>}
+    const classificationPrompt = `Classify this user task. Respond with ONLY a compact raw JSON object conforming strictly to this schema (no markdown, no backticks, no explanations):
+{
+  "category": "<general|recon|exploit|codegen|audit|analysis>",
+  "planDepth": <integer 1-10>,
+  "is_ambiguous": <boolean true|false>,
+  "confidence": <float 0.0-1.0>
+}
 Task: ${promptText}`;
 
     const timeoutMs = 3000;
     let timer: any;
-    const timeoutPromise = new Promise<null>((resolve) => {
+    const timeoutPromise = new Promise<TaskClassification>((resolve) => {
       timer = setTimeout(() => {
         controller.abort();
-        resolve(null);
+        resolve(escalationFallback);
       }, timeoutMs);
     });
 
-    const executionPromise = (async (): Promise<TaskClassification | null> => {
+    const executionPromise = (async (): Promise<TaskClassification> => {
       try {
         let fullResponse = '';
         const msgs: Message[] = [
@@ -184,27 +205,57 @@ Task: ${promptText}`;
         }
 
         if (controller.signal.aborted || !fullResponse.trim()) {
-          return null;
+          return escalationFallback;
         }
 
         const jsonMatch = fullResponse.match(/\{[\s\S]*?\}/);
-        if (!jsonMatch) return null;
+        if (!jsonMatch) {
+          return escalationFallback;
+        }
 
-        const parsed = JSON.parse(jsonMatch[0]);
-        const category = String(parsed.category || parsed.domain || 'general').trim().toLowerCase();
+        let parsed: any;
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          return escalationFallback;
+        }
+
+        // Validate schema conformance
+        const validCategories = ['general', 'recon', 'exploit', 'codegen', 'audit', 'analysis'];
+        const rawCategory = String(parsed.category || parsed.domain || '').trim().toLowerCase();
+        const hasValidCategory = validCategories.includes(rawCategory);
+        const hasPlanDepth = typeof parsed.planDepth === 'number' || typeof parsed.plan_depth === 'number';
+        const hasAmbiguityField = typeof parsed.is_ambiguous === 'boolean' || typeof parsed.ambiguity === 'number';
+        const hasConfidenceField = typeof parsed.confidence === 'number';
+
+        const isSchemaConformant = Boolean(parsed && hasValidCategory && (hasPlanDepth || hasConfidenceField || hasAmbiguityField));
+
+        const category = hasValidCategory ? rawCategory : 'general';
         const planDepth = Math.max(1, Math.min(10, Math.round(Number(parsed.planDepth ?? parsed.plan_depth ?? 1))));
-        const ambiguity = Math.max(0, Math.min(1, Number(parsed.ambiguity ?? parsed.ambiguity_score ?? 0.2)));
-        const confidence = Math.max(0, Math.min(1, Number(parsed.confidence ?? (1 - ambiguity))));
+        const isAmbiguous = typeof parsed.is_ambiguous === 'boolean'
+          ? parsed.is_ambiguous
+          : (Number(parsed.ambiguity ?? parsed.ambiguity_score ?? 0.2) > 0.5);
+        const ambiguity = isAmbiguous ? 0.8 : Math.max(0, Math.min(1, Number(parsed.ambiguity ?? parsed.ambiguity_score ?? 0.2)));
+        const confidence = typeof parsed.confidence === 'number'
+          ? Math.max(0, Math.min(1, parsed.confidence))
+          : (1 - ambiguity);
+
+        // Escalation threshold check: confidence < 0.6 or is_ambiguous=true or schema non-conformant
+        const CONFIDENCE_THRESHOLD = 0.6;
+        const needsEscalation = !isSchemaConformant || isAmbiguous || confidence < CONFIDENCE_THRESHOLD;
 
         return {
           category,
           domain: category,
-          planDepth,
-          ambiguity,
-          confidence
+          planDepth: needsEscalation ? Math.max(planDepth, 7) : planDepth,
+          ambiguity: needsEscalation ? Math.max(ambiguity, 0.7) : ambiguity,
+          confidence,
+          is_ambiguous: isAmbiguous,
+          schema_conformant: isSchemaConformant,
+          forceEscalate: needsEscalation
         };
       } catch {
-        return null;
+        return escalationFallback;
       }
     })();
 
@@ -298,7 +349,24 @@ Task: ${promptText}`;
       // Claude (anthropic/openrouter-claude/claude-cli) is never an auto cheap/smart pick —
       // policy: sauron never spends Claude tokens on its own initiative. Claude stays
       // reachable only via explicit `--model claude-cli` / `--model claude-3-7-sonnet` etc.
-      if (mode === 'cheap') {
+      const shouldForceSmart = classification?.forceEscalate || mode === 'smart';
+
+      if (shouldForceSmart) {
+        const smartCandidates = this.catalog
+          .filter((m) => m.routable && realAvailable.includes(m.provider))
+          .sort((a, b) => b.intelligence - a.intelligence);
+        if (smartCandidates.length > 0) {
+          targetModel = smartCandidates[0].model;
+        } else if (available.includes('antigravity')) {
+          targetModel = 'gemini-3.1-pro-high';
+        } else if (available.includes('openai')) {
+          targetModel = 'gpt-4o';
+        } else if (available.includes('gemini')) {
+          targetModel = 'gemini-3.5-flash-lite';
+        } else {
+          targetModel = 'local-engine';
+        }
+      } else if (mode === 'cheap') {
         if (available.includes('antigravity')) targetModel = 'gemini-3.8-flash-medium';
         else if (available.includes('gemini')) targetModel = 'gemini-3.5-flash-lite';
         else if (available.includes('openai')) {
@@ -307,14 +375,6 @@ Task: ${promptText}`;
             ?? this.catalog.filter((m) => m.provider === 'openai' && m.routable).sort((a, b) => a.costRank - b.costRank)[0]?.model
             ?? 'gpt-4o-mini';
         } else targetModel = 'local-engine';
-      } else if (mode === 'smart') {
-        if (available.includes('antigravity')) targetModel = 'gemini-3.1-pro-high';
-        else if (available.includes('openai')) {
-          targetModel = this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model === 'gpt-4o')?.model
-            ?? this.catalog.filter((m) => m.provider === 'openai' && m.routable).sort((a, b) => b.intelligence - a.intelligence)[0]?.model
-            ?? 'gpt-4o';
-        } else if (available.includes('gemini')) targetModel = 'gemini-3.5-flash-lite';
-        else targetModel = 'local-engine';
       } else {
         // Auto: combine plan-depth + ambiguity output from classifier with catalog intelligence
         // and lessonStore bias into one complexity score used for candidate ranking.
