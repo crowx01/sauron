@@ -381,6 +381,20 @@ Task: ${promptText}`;
     let targetModel = options.model;
     const mode = options.mode || 'auto';
 
+    // Claude is not an option, period — not even via explicit --model. Previously
+    // routable:false still let `--model claude-cli` bypass auto-routing entirely (matched
+    // directly below, no routable check). Redirect any explicit request for a Claude-backed
+    // entry back into normal auto-routing instead of refusing outright, so the user still
+    // gets a response rather than an error.
+    if (targetModel) {
+      const explicitMatch = this.catalog.find(
+        (m) => m.model.toLowerCase() === targetModel!.toLowerCase() || m.aliases?.some((a) => a.toLowerCase() === targetModel!.toLowerCase())
+      );
+      if (explicitMatch && !explicitMatch.routable) {
+        targetModel = 'auto';
+      }
+    }
+
     const available = providerRegistry.getAvailableProviders();
 
     // Available real providers (excluding local-engine)

@@ -16,8 +16,10 @@ describe('Sauron CLI End-to-End Command Suite', () => {
     const res = spawnSync('node', [cliPath, 'models'], { encoding: 'utf-8' });
     expect(res.status).toBe(0);
     expect(res.stdout).toContain('SAURON MODEL CATALOG');
-    expect(res.stdout).toContain('claude-3-7-sonnet');
     expect(res.stdout).toContain('gemini-3.5-flash-lite');
+    // Claude is routable:false by policy — never listed as a selectable option.
+    expect(res.stdout).not.toContain('claude-3-7-sonnet');
+    expect(res.stdout).not.toContain('claude-cli');
   });
 
   test('CLI sessions command lists available saved sessions', () => {

@@ -46,7 +46,9 @@ export class OpenCodeEngine {
   private isBusy = false;
   private sidebarVisible = true;
   private slashSelectedIndex = 0;
-  private mouseTrackingEnabled = false;
+  private mouseTrackingEnabled = true;
+  private inBracketedPaste = false;
+  private bracketedPasteBuffer = '';
 
   private tabBar = new SessionTabBar();
   private sidebar = new SidebarPane();
@@ -65,8 +67,8 @@ export class OpenCodeEngine {
   public start() {
     if (this.isRaw) return;
 
-    // Enter alternate screen buffer & hide cursor (leave mouse selection native)
-    process.stdout.write('\x1b[?1049h\x1b[?25l');
+    // Enter alternate screen buffer, enable SGR 1000/1006 mouse tracking, hide cursor, and enable bracketed paste mode (\x1b[?2004h)
+    process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[?2004h');
 
     if (process.stdin.setRawMode) {
       process.stdin.setRawMode(true);
@@ -81,7 +83,7 @@ export class OpenCodeEngine {
     });
 
     process.stdin.on('data', (data: Buffer | string) => {
-      this.handleInput(data.toString());
+      this.processRawInput(data.toString());
     });
 
     // Install panic traps
@@ -100,8 +102,8 @@ export class OpenCodeEngine {
       this.isRaw = false;
     }
 
-    // Disable SGR mouse tracking, leave alternate screen buffer & show cursor
-    process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
+    // Disable bracketed paste mode (\x1b[?2004l), disable mouse tracking, show cursor & leave alternate screen
+    process.stdout.write('\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
 
     if (error) {
       console.error('\n[SAURON TUI PANIC RECOVERY]:', error);
@@ -164,8 +166,104 @@ export class OpenCodeEngine {
     );
   }
 
+  public static pasteFromClipboard(): string | null {
+    try {
+      const { execSync } = require('node:child_process');
+      if (process.platform === 'linux') {
+        const cmds = [
+          'xclip -selection clipboard -o 2>/dev/null',
+          'wl-paste 2>/dev/null',
+          'xsel --clipboard -o 2>/dev/null',
+          'xclip -selection primary -o 2>/dev/null',
+          'xsel --primary -o 2>/dev/null'
+        ];
+        for (const cmd of cmds) {
+          try {
+            const out = execSync(cmd, { encoding: 'utf-8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] });
+            if (out && out.length > 0) return out;
+          } catch {}
+        }
+      } else if (process.platform === 'darwin') {
+        return execSync('pbpaste 2>/dev/null', { encoding: 'utf-8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] });
+      } else if (process.platform === 'win32') {
+        return execSync('powershell.exe -NoProfile -Command Get-Clipboard 2>$null', { encoding: 'utf-8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] });
+      }
+    } catch {}
+    return null;
+  }
+
+  public pasteFromClipboard(): string | null {
+    return OpenCodeEngine.pasteFromClipboard();
+  }
+
+  public handlePastedText(text: string) {
+    if (!text) return;
+    const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    if (modalManager.getActiveModal() !== 'none') {
+      if (modalManager.handlePaste(clean)) {
+        this.render();
+      }
+      return;
+    }
+
+    this.insertAtCursor(clean);
+    if (this.promptBuffer.startsWith('/')) {
+      const filtered = this.getFilteredSlashCommands();
+      this.slashSelectedIndex = Math.min(this.slashSelectedIndex, Math.max(0, filtered.length - 1));
+    }
+    this.render();
+  }
+
+  public processRawInput(chunk: string) {
+    let remaining = chunk;
+
+    while (remaining.length > 0) {
+      if (this.inBracketedPaste) {
+        const endIdx = remaining.indexOf('\x1b[201~');
+        if (endIdx !== -1) {
+          this.bracketedPasteBuffer += remaining.slice(0, endIdx);
+          const pasted = this.bracketedPasteBuffer;
+          this.bracketedPasteBuffer = '';
+          this.inBracketedPaste = false;
+          this.handlePastedText(pasted);
+          remaining = remaining.slice(endIdx + 6);
+        } else {
+          this.bracketedPasteBuffer += remaining;
+          return;
+        }
+      } else {
+        const startIdx = remaining.indexOf('\x1b[200~');
+        if (startIdx !== -1) {
+          const before = remaining.slice(0, startIdx);
+          if (before.length > 0) {
+            this.handleInput(before);
+          }
+          this.inBracketedPaste = true;
+          this.bracketedPasteBuffer = '';
+          remaining = remaining.slice(startIdx + 6);
+        } else {
+          this.handleInput(remaining);
+          return;
+        }
+      }
+    }
+  }
+
   private handleInput(str: string) {
     const key = this.parseKey(str);
+
+    // Direct Clipboard Paste: Ctrl+V, \x16, or Shift+Insert (\x1b[2;2~, \x1b[2~)
+    if ((key.ctrl && key.name === 'v') || str === '\x16' || str === '\x1b[2;2~' || str === '\x1b[2~') {
+      const text = this.pasteFromClipboard();
+      if (text) {
+        this.handlePastedText(text);
+      } else {
+        this.notify('Clipboard is empty or inaccessible.');
+        this.render();
+      }
+      return;
+    }
 
     // Shift+Tab Mode Switcher (NORMAL -> /COMMAND -> !SHELL -> @ATTACH -> NORMAL)
     if (key.name === 'backtab' || (key.name === 'tab' && key.shift) || str === '\x1b[Z') {
@@ -208,14 +306,19 @@ export class OpenCodeEngine {
     }
 
     // 3. Mouse Wheel Scroll & PageUp / PageDown Transcript Scroll
-    if (key.name === 'pageup') {
-      this.scrollOffset += 3;
+    const upMatches = (str.match(/<(64|68|72|80);/g) || []).length;
+    const downMatches = (str.match(/<(65|69|73|81);/g) || []).length;
+
+    if (key.name === 'pageup' || upMatches > 0) {
+      const delta = Math.max(1, upMatches) * 3;
+      this.scrollOffset += delta;
       this.render();
       return;
     }
 
-    if (key.name === 'pagedown') {
-      this.scrollOffset = Math.max(0, this.scrollOffset - 3);
+    if (key.name === 'pagedown' || downMatches > 0) {
+      const delta = Math.max(1, downMatches) * 3;
+      this.scrollOffset = Math.max(0, this.scrollOffset - delta);
       this.render();
       return;
     }
@@ -365,17 +468,20 @@ export class OpenCodeEngine {
       return;
     }
 
-    // Plain text typing (also handles pasted chunks)
-    if (!key.ctrl && !key.alt && /^[\x20-\x7e\u00a0-\uffff]+$/.test(str)) {
-      if (this.promptBuffer === '' && str === '/') {
-        this.slashSelectedIndex = 0;
+    // Plain text typing and pasted text chunks (supports multiline, tabs, unicode, and emojis)
+    if (!key.ctrl && !key.alt && !str.startsWith('\x1b')) {
+      if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str)) {
+        const normalized = str.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        if (this.promptBuffer === '' && normalized === '/') {
+          this.slashSelectedIndex = 0;
+        }
+        this.insertAtCursor(normalized);
+        if (this.promptBuffer.startsWith('/')) {
+          const filtered = this.getFilteredSlashCommands();
+          this.slashSelectedIndex = Math.min(this.slashSelectedIndex, Math.max(0, filtered.length - 1));
+        }
+        this.render();
       }
-      this.insertAtCursor(str);
-      if (this.promptBuffer.startsWith('/')) {
-        const filtered = this.getFilteredSlashCommands();
-        this.slashSelectedIndex = Math.min(this.slashSelectedIndex, Math.max(0, filtered.length - 1));
-      }
-      this.render();
     }
   }
 
@@ -483,7 +589,7 @@ export class OpenCodeEngine {
       case 'COPY_LAST_RESPONSE': this.copyLastAssistantMessage(); break;
       case 'TOGGLE_MOUSE_MODE': this.toggleMouseTracking(); break;
       case 'CYCLE_QUICK_MODEL':
-        const models = ['claude-3-7-sonnet', 'gpt-4o', 'gemini-3.5-flash-lite'];
+        const models = ['gemini-3.1-pro-high', 'gpt-4o', 'gemini-3.5-flash-lite'];
         const cur = chatRouter.getDefaultModel();
         const next = models[(models.indexOf(cur) + 1) % models.length];
         chatRouter.setDefaultModel(next);
@@ -497,6 +603,16 @@ export class OpenCodeEngine {
         this.promptBuffer = words.join(' ');
         this.cursorOffset = this.promptBuffer.length;
         break;
+      case 'PASTE_CLIPBOARD': {
+        const text = this.pasteFromClipboard();
+        if (text) {
+          this.handlePastedText(text);
+        } else {
+          this.notify('Clipboard is empty or inaccessible.');
+          this.render();
+        }
+        break;
+      }
     }
   }
 
@@ -605,11 +721,14 @@ export class OpenCodeEngine {
     const activeSession = sessionStore.getActiveSession();
     frame += this.tabBar.render(width, activeSession.title, sessionStore.listSessions().length, t) + '\n';
 
+    // Bottom: Prompt Composer
+    const composerLines = this.composer.renderPrompt(this.promptBuffer, this.cursorOffset, width, this.isBusy, t);
+
     // Layout Split: Responsive Sidebar (collapses below 80 cols) + Main Transcript Pane
     const isSidebarVisible = this.sidebarVisible && width >= 80;
     const sidebarW = isSidebarVisible ? Math.min(32, Math.floor(width * 0.25)) : 0;
     const mainW = width - sidebarW;
-    const mainH = height - 7; // Top tab bar (1) + Prompt Composer (6)
+    const mainH = Math.max(3, height - 1 - composerLines.length); // Top tab bar (1) + Prompt Composer lines
 
     const sidebarLines = isSidebarVisible ? this.sidebar.render(sidebarW, mainH, t) : [];
 
@@ -641,8 +760,6 @@ export class OpenCodeEngine {
       frame += left + right + '\n';
     }
 
-    // Bottom: Prompt Composer
-    const composerLines = this.composer.renderPrompt(this.promptBuffer, this.cursorOffset, width, this.isBusy, t);
     frame += composerLines.join('\n');
 
     // Overlay: Slash Command Palette Overlay (if buffer starts with /)
@@ -677,9 +794,9 @@ export class OpenCodeEngine {
   }
 
   private parseKey(str: string): { name?: string; ctrl?: boolean; alt?: boolean; shift?: boolean; word?: boolean } {
-    // SGR Mouse wheel scroll decoding (<64; = Up, <65; = Down) or PageUp/PageDown
-    if (str.includes('<64;') || str.startsWith('\x1b[<64') || str === '\x1b[5~') return { name: 'pageup' };
-    if (str.includes('<65;') || str.startsWith('\x1b[<65') || str === '\x1b[6~') return { name: 'pagedown' };
+    // SGR Mouse wheel scroll decoding (<64; = Up, <65; = Down, with Shift/Alt/Ctrl modifiers) or PageUp/PageDown
+    if (/<(64|68|72|80);/.test(str) || str.startsWith('\x1b[<64') || str === '\x1b[5~' || str === '\x1b[Ma' || str === '\x1b[M`') return { name: 'pageup' };
+    if (/<(65|69|73|81);/.test(str) || str.startsWith('\x1b[<65') || str === '\x1b[6~' || str === '\x1b[Mb') return { name: 'pagedown' };
 
     // Tab & Backtab (Shift+Tab)
     if (str === '\x1b[Z' || str === '\x1b[9;2u') return { name: 'backtab', shift: true };
