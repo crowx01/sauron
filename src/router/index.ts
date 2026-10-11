@@ -9,9 +9,10 @@ import {
   readDiskCache
 } from './catalog_fetch';
 import { computeBlastRadius, BlastRadiusResult } from './blast_radius';
+import { requestPlanDAG, executePlanDAG, isNonLinearTask, PlanNode, DAGExecutionResult } from './plan_dag';
 
-export { STATIC_CATALOG, computeBlastRadius };
-export type { BlastRadiusResult };
+export { STATIC_CATALOG, computeBlastRadius, requestPlanDAG, executePlanDAG, isNonLinearTask };
+export type { BlastRadiusResult, PlanNode, DAGExecutionResult };
 
 export class ChatRouter {
   public defaultModel = 'gemini-3.1-pro-high';
@@ -533,6 +534,25 @@ Task: ${promptText}`;
     // The full blackboard / shared-context bus across multi-agent turns is explicitly out
     // of scope for this pass and flagged for a future phase. Current coordination is handled
     // via circuit-breaker escalation context propagation across chain targets in dispatch().
+
+    // 3. Plan/Execute split for 'auto' smart-tier dispatch:
+    // If task is classified as multi-step / non-linear, request strict JSON plan DAG from smart-tier model
+    // and execute DAG nodes in dependency order via local-engine toolBelt.
+    const isSmartTierTarget = primaryProvider !== 'local-engine' && (primaryModel.includes('pro') || primaryModel.includes('gpt-4o') || primaryModel.includes('flash'));
+    const isNonLinear = classification ? isNonLinearTask(classification.planDepth, classification.category) : false;
+
+    if (mode === 'auto' && isSmartTierTarget && isNonLinear) {
+      const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+      const smartClient = providerRegistry.get(primaryProvider);
+
+      if (smartClient && smartClient.isAvailable() && promptText) {
+        const dagPlan = await requestPlanDAG(smartClient, primaryModel, promptText, options);
+        if (dagPlan && dagPlan.length > 0) {
+          yield* executePlanDAG(dagPlan, options);
+          return;
+        }
+      }
+    }
 
     const chain = [{ model: primaryModel, provider: primaryProvider }, ...fallbacks];
     const failureHistory: { provider: string; model: string; reason: string }[] = [];
