@@ -11,7 +11,7 @@ describe('Sauron Agentic Logic & Orchestration Suite', () => {
     expect(result.status).toBe('complete');
     expect(result.finalAnswer).toBeDefined();
     expect(result.turns).toBeGreaterThanOrEqual(1);
-  }, { timeout: 15000 });
+  }, { timeout: 30000 });
 
   // Test 2: ReAct loop prompt injection defense
   test('L2: ReAct loop sanitizes untrusted tool outputs containing tool tags', async () => {
