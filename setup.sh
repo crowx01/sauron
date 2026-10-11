@@ -212,7 +212,7 @@ STEPS=(
   "claude_md|CLAUDE.md doctrine"
   "skills_install|Shipped skills installed"
   "pentest_sync|pentesting-skills synchronised"
-  "pal_register|PAL MCP registered"
+  "pal_register|Sauron engine setup"
   "env_keys|API keys"
 )
 resume_banner "${STEPS[@]}"
@@ -593,13 +593,7 @@ do_pentest_sync() {
 }
 checkpoint pentest_sync "sync pentesting-skills" do_pentest_sync
 
-# ---------- 11. Sauron core engine (bundled PAL) MCP register ----------
-# The PAL engine now ships INSIDE sauron at ./core — one install, no separate
-# download. Registered under the mcpServers key "pal" for internal/back-compat.
-CORE_DIR="$SCRIPT_DIR/core"
-CORE_VENV="$CORE_DIR/.sauron_venv"
-PAL_DIR="${PAL_DIR:-$CORE_DIR}"          # bundled core; override only for dev checkouts
-PAL_REPO="https://github.com/crowx01/sauron"
+# ---------- 11. Sauron engine (Bun / TypeScript) setup ----------
 register_pal() {
   [ "$ORCH" = "c" ] || { warn "non-Claude orchestrator: start the engine yourself with 'sauron serve'"; return 0; }
 
@@ -621,70 +615,40 @@ TBJSON
     ok "wrote default toolbelt config → ~/.pal/toolbelt.json"
   fi
 
-  [ -f "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
-  command -v python3 >/dev/null 2>&1 || { err "python3 not found"; return 1; }
-  local tmp cfg="$HOME/.claude.json"
+  step "Sauron engine setup"
+  local bun_cmd=""
+  if command -v bun >/dev/null 2>&1; then
+    bun_cmd="bun"
+  elif [ -x "$HOME/.bun/bin/bun" ]; then
+    bun_cmd="$HOME/.bun/bin/bun"
+  fi
 
-  # Resolve which core to register. Prefer the BUNDLED ./core. Only if it is
-  # genuinely absent (partial dev checkout) keep an existing external core, else
-  # clone. This is also the MIGRATION: an old install whose .mcpServers.pal still
-  # points at ~/tools/pal-mcp-server gets repointed to the bundled core below.
-  local core="$CORE_DIR"
-  if [ ! -f "$core/server.py" ]; then
-    local prev; prev="$(jq -r '.mcpServers.pal.args[0] // empty' "$cfg" 2>/dev/null || true)"
-    if [ -n "$prev" ] && [ -f "$prev" ]; then
-      core="$(dirname "$prev")"                       # reuse the existing external core
-    else
-      command -v git >/dev/null 2>&1 || { err "bundled core/ missing and git not found"; return 1; }
-      core="$PAL_DIR"
-      if [ ! -f "$core/server.py" ]; then
-        info "bundled core/ missing; cloning $PAL_REPO → $core"
-        [ -d "$core/.git" ] || git clone --depth 1 "$PAL_REPO" "$core" || return 1
-        [ -f "$core/server.py" ] || core="$core/core"
-      fi
+  if [ -n "$bun_cmd" ]; then
+    info "installing engine dependencies via bun..."
+    ( cd "$SCRIPT_DIR" && "$bun_cmd" install ) || warn "bun install completed with warnings"
+  elif command -v npm >/dev/null 2>&1; then
+    info "installing engine dependencies via npm..."
+    ( cd "$SCRIPT_DIR" && npm install --no-audit --no-fund ) || warn "npm install completed with warnings"
+  else
+    warn "Neither bun nor npm found. Please install bun (curl -fsSL https://bun.sh/install | bash)."
+  fi
+
+  # Clean up legacy Python core MCP server registration in ~/.claude.json if present
+  local cfg="$HOME/.claude.json"
+  if [ -f "$cfg" ] && jq -e '.mcpServers.pal' "$cfg" >/dev/null 2>&1; then
+    local prev_srv
+    prev_srv="$(jq -r '.mcpServers.pal.args[0] // empty' "$cfg" 2>/dev/null || true)"
+    if [[ "$prev_srv" == *"core/server.py"* ]] || [[ "$prev_srv" == *"pal-mcp-server"* ]]; then
+      info "cleaning legacy Python core MCP server from $cfg"
+      local tmp; tmp="$(mktemp)"
+      jq 'del(.mcpServers.pal)' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+      ok "removed legacy core/server.py MCP registration"
     fi
   fi
 
-  # Pick the venv: prefer a .sauron_venv; adopt a legacy .pal_venv if that is
-  # what already exists next to the core.
-  local venv="$core/.sauron_venv"
-  if [ ! -x "$venv/bin/python" ] && [ -x "$core/.pal_venv/bin/python" ]; then
-    venv="$core/.pal_venv"
-  fi
-
-  # Fast path: already registered, pointing at THIS core, venv ready, toolbelt on.
-  if [ -x "$venv/bin/python" ] \
-     && [ "$(jq -r '.mcpServers.pal.args[0] // empty' "$cfg" 2>/dev/null || true)" = "$core/server.py" ] \
-     && jq -e '.mcpServers.pal.env.PAL_TOOLBELT' "$cfg" >/dev/null 2>&1; then
-    ok "Sauron core engine already registered (core=$core, toolbelt on)"
-    return 0
-  fi
-
-  # Provision venv (idempotent) then (RE)WRITE the registration. One jq both
-  # installs fresh AND migrates an old external registration to this core, while
-  # PRESERVING any user-added env keys (e.g. API keys) via env-merge.
-  if [ ! -x "$venv/bin/python" ]; then
-    venv="$core/.sauron_venv"
-    python3 -m venv "$venv"
-  fi
-  "$venv/bin/python" -m pip install -q -r "$core/requirements.txt"
-  tmp="$(mktemp)"
-  # PAL_TOOLBELT=1 turns on the agentic tool-loop; smart-router features
-  # (self-heal, cache, classifier, refusal-memory, health-probe) default on in-code.
-  jq --arg cmd "$venv/bin/python" --arg srv "$core/server.py" '
-    .mcpServers = (.mcpServers // {})
-    | .mcpServers.pal = {
-        type: "stdio",
-        command: $cmd,
-        args: [$srv],
-        env: ((.mcpServers.pal.env // {}) + {
-          DEFAULT_MODEL: ((.mcpServers.pal.env.DEFAULT_MODEL) // "auto"),
-          PAL_TOOLBELT: "1"
-        })
-      }' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
-  ok "Sauron core engine registered (core=$core, DEFAULT_MODEL=auto, toolbelt on)"
+  ok "Sauron TypeScript/Bun engine ready"
 }
-checkpoint pal_register "PAL MCP registration" register_pal
+checkpoint pal_register "Sauron engine setup" register_pal
 
 # ---------- 11b. sanity-check: do the auto-loaded skills actually exist? ----------
 # A hook that orders Skill(x) for a skill that is not installed makes every session start
@@ -771,13 +735,13 @@ step "Next steps"
 case "$ORCH" in
   c) cat <<EOF
   1. Source your API keys:  source $(dirname "$TARGET")/.env.sauron
-  2. Restart Claude Code (the bundled core engine auto-starts as the 'pal' MCP server).
+  2. Launch Sauron TUI anytime:  sauron chat      (OpenCode-inspired terminal UI)
+     or execute headless tasks:  sauron run "<task>"
+     or run adaptive missions:   sauron mission "<goal>"
   3. Session-start skills auto-load on the next session.
-  4. Talk to the engine directly any time:  sauron chat      (interactive router)
-     or start it standalone / for other clients:  sauron serve
-  5. Add more pentesting skills any time:  npx --yes github:crowx01/sauron add <skill>
-                                          (or  ./setup.sh add <skill>)
-  6. Refresh pentesting-skills:  npx --yes github:crowx01/sauron sync
+  4. Add more pentesting skills any time:  sauron add <skill>
+                                           (or  ./setup.sh add <skill>)
+  5. Refresh pentesting-skills:  sauron sync
 EOF
   ;;
   *) cat <<EOF

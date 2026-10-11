@@ -95,6 +95,16 @@ Systematic verification of all source modules across `core/sauron/`, `core/clink
 
 ---
 
+## Step 4: Setup Script and Documentation Modernization
+- **`setup.sh`**: Replaced legacy Python venv creation, pip installation, and `core/server.py` MCP server registration with Bun/TypeScript engine install (`bun install`) and automated cleanup of dead legacy `mcpServers.pal` entries from `~/.claude.json`.
+- **`docs/WORKFLOW.md`**: Updated installation flow to describe the Bun/TypeScript engine (`src/cli.ts` on Bun v1.4+) with zero Python runtime dependencies.
+- **`docs/install-walkthrough.html`**: Updated engine overview, next steps, and command reference to reflect the Bun/TS CLI flow.
+- **`.env.example`**: Updated header reference to the native engine.
+- **`SAURON_RESILIENCE_PLAN.md`**: Updated repository and test execution instructions to Bun test suite.
+- **`bin/setup-lib.sh`**: Updated catalog sync comments.
+
+---
+
 ## Verification Summary
 - **Bun Automated Test Suites**: **87 pass, 0 fail, 2784 expect() calls across 8 test files** (`bun test`).
 - **CLI Commands Verified**: `sauron chat`, `sauron diag`, `sauron models`, `sauron run`, `sauron mission`, `sauron debate`, `sauron sessions`, `sauron selftest`.
