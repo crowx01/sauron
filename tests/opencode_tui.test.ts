@@ -109,4 +109,18 @@ describe('OpenCode TUI Architecture Suite', () => {
     expect(res.text).toBe('hello');
     expect(res.pos).toBe(5);
   });
+
+  test('Slash Palette: OpenCodeEngine renders floating Slash Command Palette overlay when prompt starts with /', () => {
+    const { OpenCodeEngine, ALL_SLASH_COMMANDS } = require('../src/tui/opencode_engine');
+    expect(ALL_SLASH_COMMANDS.length).toBeGreaterThanOrEqual(8);
+
+    const engine = new OpenCodeEngine();
+    // Simulate prompt starting with slash
+    (engine as any).promptBuffer = '/mo';
+    const overlay = engine.renderSlashOverlay(100, themeStore.getTheme());
+    expect(overlay.length).toBeGreaterThan(3);
+    const joined = overlay.join('\n');
+    expect(joined).toContain('SLASH COMMAND PALETTE');
+    expect(joined).toContain('/model');
+  });
 });
