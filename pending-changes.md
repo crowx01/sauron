@@ -62,6 +62,32 @@ Comprehensive grep across `src/`, `bin/`, `package.json`, `setup.sh`, `scripts/`
 
 ---
 
+## Step 2: Feature-Parity Scan Matrix
+Systematic verification of all source modules across `core/sauron/`, `core/clink/`, `core/providers/`, `core/utils/` against `src/`:
+
+| Core Module (`core/`) | Functionality | TypeScript Location (`src/`) | Parity Status |
+| :--- | :--- | :--- | :--- |
+| `core/sauron/clear_sessions.py` | Disk session file purge | `src/session/index.ts` (`clear()`) | **Full Parity** |
+| `core/clink/` (agents & parsers) | External CLI wrapper processes | `src/providers/index.ts`, `src/providers/antigravity.ts` | **Full Parity** (Claude-CLI excluded per policy) |
+| `core/providers/*.py` (OpenAI, Gemini, OpenRouter, Anthropic) | Model API streaming clients | `src/providers/index.ts` (`OpenAIProviderClient`, `GeminiProviderClient`, `OpenRouterProviderClient`, `AnthropicProviderClient`) | **Full Parity** |
+| `core/providers/router/catalog.py` | Dynamic & static model catalogs | `src/router/catalog_fetch.ts`, `src/router/index.ts` | **Full Parity** |
+| `core/providers/router/lesson_store.py`, `bandit.py`, `distill.py` | Recency-weighted routing bandit & stats | `src/router/lessons.ts` (`lessonStore`) | **Full Parity** |
+| `core/providers/router/mission.py` | Writer-Executor-Judge pipeline | `src/mission/index.ts` (`missionRunner`) | **Full Parity** |
+| `core/providers/router/debate.py` | Multi-model debate & consensus synthesis | `src/agent/debate.ts`, `src/debate/index.ts` (`debateEngine`) | **Full Parity** |
+| `core/providers/router/session_store.py` | Session storage, history, metadata | `src/session/index.ts` (`sessionStore`) | **Full Parity** |
+| `core/providers/router/size_guard.py` | 1MB buffer caps, bounded file reads | `src/tools/index.ts` (`MAX_BUFFER_BYTES`, bounded `readSync`) | **Full Parity** |
+| `core/providers/router/self_heal.py` | Command resolution & alternative substitution | `src/agent/resolver.ts`, `src/tools/index.ts` | **Full Parity** |
+| `core/providers/tooling/toolbelt.py`, `adapters/` (`bash`, `fs`, `webfetch`, `secsuite`) | Offensive toolbelt execution, SSRF guard | `src/tools/index.ts` (`toolBelt`, `isPrivateHost`) | **Full Parity** |
+| `core/providers/tooling/react.py` | Autonomous ReAct loop with tag sanitization | `src/agent/react.ts` (`reactAgent`, `sanitizeToolOutput`) | **Full Parity** |
+| `core/utils/advanced_autonomy.py` | Self-healing tool execution, finding graph | `src/agent/resolver.ts`, `src/agent/planner.ts` | **Full Parity** |
+| `core/utils/stateful_orchestrator.py` | Investigation DAG dependency graph & evidence | `src/agent/planner.ts` (`dagPlanner`, `TaskDAG`), `src/mission/index.ts` | **Full Parity** |
+| `core/utils/token_utils.py`, `file_utils.py`, `env.py` | Context budgeting & storage | Native Node/Bun `node:fs`, `node:child_process`, `src/config/index.ts` | **Full Parity** |
+
+- **Conclusion**: Zero load-bearing functionality is missing in `src/`. All capabilities are fully implemented in idiomatic TypeScript.
+
+
+---
+
 ## Verification Summary
 - **Bun Automated Test Suites**: **87 pass, 0 fail, 2784 expect() calls across 8 test files** (`bun test`).
 - **CLI Commands Verified**: `sauron chat`, `sauron diag`, `sauron models`, `sauron run`, `sauron mission`, `sauron debate`, `sauron sessions`, `sauron selftest`.
