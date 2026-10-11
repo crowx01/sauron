@@ -1,4 +1,5 @@
-import { render, useKeyboard, useTerminalDimensions } from '@opentui/solid';
+import { render, useKeyboard, usePaste, useTerminalDimensions } from '@opentui/solid';
+import { decodePasteBytes } from '@opentui/core';
 import { createSignal, createEffect, onCleanup, For, Show } from 'solid-js';
 import { chatRouter } from '../router';
 import { sessionStore } from '../session';
@@ -20,6 +21,19 @@ export function OpenTUIApp() {
   const [selectedModel, setSelectedModel] = createSignal(chatRouter.getDefaultModel());
   const [messages, setMessages] = createSignal(sessionStore.getActiveSession().messages);
   const [sidebarPref, setSidebarPref] = createSignal(true);
+
+  // Hook into native OpenTUI bracketed paste events
+  usePaste((event) => {
+    try {
+      const decoded = decodePasteBytes(event.bytes);
+      if (decoded) {
+        const text = decoded.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const c = cursorPos();
+        setPrompt((p) => p.slice(0, c) + text + p.slice(c));
+        setCursorPos((prev) => prev + text.length);
+      }
+    } catch {}
+  });
 
   // Responsive Breakpoints derived from reactive terminal dimensions
   const showSidebar = () => sidebarPref() && dimensions().width >= 80;
@@ -102,10 +116,10 @@ export function OpenTUIApp() {
       }
       const modal = activeModal();
       if (modal === 'model_picker') {
-        if (key.name === '1') { selectModel('claude-3-7-sonnet'); return; }
+        if (key.name === '1') { selectModel('gemini-3.1-pro-high'); return; }
         if (key.name === '2') { selectModel('gpt-4o'); return; }
         if (key.name === '3') { selectModel('gemini-3.5-flash-lite'); return; }
-        if (key.name === '4') { selectModel('claude-cli'); return; }
+        if (key.name === '4') { selectModel('gemini-3.8-flash-medium'); return; }
         if (key.name === '5') { selectModel('deepseek-r1'); return; }
       }
       if (modal === 'theme_picker') {
@@ -182,13 +196,25 @@ export function OpenTUIApp() {
       return;
     }
 
-    // Capture character typing (including / to trigger slash commands)
+    if (key.ctrl && key.name === 'v') {
+      const clipText = OpenCodeEngine.pasteFromClipboard();
+      if (clipText) {
+        const text = clipText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const c = cursorPos();
+        setPrompt((p) => p.slice(0, c) + text + p.slice(c));
+        setCursorPos((prev) => prev + text.length);
+      }
+      return;
+    }
+
+    // Capture character typing and pasted chunks (including / to trigger slash commands)
     if (!key.ctrl && !key.meta) {
       const char = key.sequence || (key.name && key.name.length === 1 ? key.name : null);
-      if (char && char.length === 1 && char >= ' ' && char <= '~') {
+      if (char && !char.startsWith('\x1b') && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(char)) {
+        const text = char.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         const c = cursorPos();
-        setPrompt((p) => p.slice(0, c) + char + p.slice(c));
-        setCursorPos((prev) => prev + 1);
+        setPrompt((p) => p.slice(0, c) + text + p.slice(c));
+        setCursorPos((prev) => prev + text.length);
       }
     }
   });
@@ -367,7 +393,7 @@ export function OpenTUIApp() {
       <Show when={prompt().startsWith('/') && activeModal() === 'none'}>
         <box flexDirection="column" width="100%" backgroundColor="#0284c7" padding={1}>
           <text color="#ffffff" bold> SLASH COMMAND AUTOCOMPLETE (Press Enter to execute) </text>
-          <text color="#e0f2fe"> /model [name]   - Select AI model (1: claude-3-7-sonnet, 2: gpt-4o, 3: gemini-3.5-flash-lite) </text>
+          <text color="#e0f2fe"> /model [name]   - Select AI model (1: gemini-3.1-pro-high, 2: gpt-4o, 3: gemini-3.5-flash-lite) </text>
           <text color="#e0f2fe"> /theme [name]   - Change UI theme (1: opencode-dark, 2: dracula, 3: catppuccin) </text>
           <text color="#e0f2fe"> /sessions       - Open sessions drawer </text>
           <text color="#e0f2fe"> /compact        - Compact context memory </text>
@@ -433,10 +459,10 @@ export function OpenTUIApp() {
         >
           <text color="#38bdf8" bold> MODEL SELECTOR PICKER (/model) </text>
           <text color="#64748b">────────────────────────────</text>
-          <text color="#a855f7" bold> 1. claude-3-7-sonnet [Anthropic] </text>
+          <text color="#a855f7" bold> 1. gemini-3.1-pro-high [Antigravity] </text>
           <text color="#e2e8f0"> 2. gpt-4o [OpenAI] </text>
           <text color="#e2e8f0"> 3. gemini-3.5-flash-lite [Gemini] </text>
-          <text color="#e2e8f0"> 4. claude-cli [Local CLI] </text>
+          <text color="#e2e8f0"> 4. gemini-3.8-flash-medium [Antigravity] </text>
           <text color="#e2e8f0"> 5. deepseek-r1 [DeepSeek] </text>
           <text color="#f87171"> Press 1-5 to pick model, or Escape to close </text>
         </box>

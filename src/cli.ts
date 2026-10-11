@@ -68,7 +68,9 @@ async function main() {
 
     case 'models':
       console.log('--- SAURON MODEL CATALOG ---');
-      for (const entry of chatRouter.getCatalog()) {
+      // Claude-backed entries (routable:false) are excluded from this listing by policy —
+      // sauron never offers Claude as a selectable model option. See router/index.ts policy note.
+      for (const entry of chatRouter.getCatalog().filter((e) => e.routable)) {
         console.log(`Model: ${entry.model.padEnd(30)} Provider: ${entry.provider.padEnd(12)} Intelligence: ${entry.intelligence}`);
       }
       break;
