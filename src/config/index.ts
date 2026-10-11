@@ -31,7 +31,7 @@ export class ConfigManager {
 
     return {
       defaultModel: process.env.SAURON_MODEL || 'auto',
-      smartModel: process.env.SAURON_SMART_MODEL || 'claude-3-7-sonnet',
+      smartModel: process.env.SAURON_SMART_MODEL || 'gemini-3.1-pro-high', // never Claude by default — see router/index.ts policy note
       cheapModel: process.env.SAURON_CHEAP_MODEL || 'gemini-2.0-flash',
       customModelsPath: join(sauronDir, 'custom_models.json'),
       sessionDir,
