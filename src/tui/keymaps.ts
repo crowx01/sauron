@@ -36,6 +36,8 @@ export class KeymapRegistry {
       { id: 'compact', name: 'Compact Context', key: '<leader>c', description: 'Summarize context & save JSONL archive', category: 'session', action: 'COMPACT_CONTEXT' },
       { id: 'sidebar', name: 'Toggle Sidebar', key: '<leader>b', description: 'Show/hide left information panel', category: 'navigation', action: 'TOGGLE_SIDEBAR' },
       { id: 'quick_model', name: 'Quick Model Switch', key: 'f2', description: 'Cycle through top 3 catalog models', category: 'modal', action: 'CYCLE_QUICK_MODEL' },
+      { id: 'copy_response', name: 'Copy Last Response', key: '<leader>y / ctrl+y', description: 'Copy last assistant message to system clipboard', category: 'global', action: 'COPY_LAST_RESPONSE' },
+      { id: 'mouse_mode', name: 'Toggle Mouse Selection', key: '<leader>s', description: 'Toggle native terminal mouse selection mode', category: 'global', action: 'TOGGLE_MOUSE_MODE' },
       
       // Emacs Prompt Navigation
       { id: 'emacs_home', name: 'Line Start', key: 'ctrl+a', description: 'Move cursor to line start', category: 'prompt', action: 'CURSOR_HOME' },
@@ -77,12 +79,15 @@ export class KeymapRegistry {
         case 'k': return 'OPEN_WHICH_KEY';
         case 'c': return 'COMPACT_CONTEXT';
         case 'b': return 'TOGGLE_SIDEBAR';
+        case 'y': return 'COPY_LAST_RESPONSE';
+        case 's': return 'TOGGLE_MOUSE_MODE';
         default: return null;
       }
     }
 
     // Direct Keys
     if (key.ctrl && key.name === 'p') return 'OPEN_PALETTE';
+    if (key.ctrl && key.name === 'y') return 'COPY_LAST_RESPONSE';
     if (key.name === 'f2') return 'CYCLE_QUICK_MODEL';
     if (key.name === 'escape') return 'DISMISS';
     if (key.ctrl && key.alt && key.name === 'k') return 'OPEN_WHICH_KEY';
