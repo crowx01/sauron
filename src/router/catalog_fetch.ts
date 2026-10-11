@@ -14,7 +14,7 @@ export const STATIC_CATALOG: ModelEntry[] = [
   { model: 'claude-3-5-sonnet-20241022', provider: 'anthropic', intelligence: 95, costRank: 3, routable: false, tools: true, aliases: ['sonnet', 'claude-3.5-sonnet'] },
   { model: 'claude-cli', provider: 'claude-cli', intelligence: 94, costRank: 1, routable: false, tools: true, aliases: ['claude'] },
   { model: 'anthropic/claude-3.5-sonnet', provider: 'openrouter', intelligence: 95, costRank: 3, routable: false, tools: true, aliases: ['openrouter/claude'] },
-  { model: 'gemini-2.0-flash', provider: 'gemini', intelligence: 88, costRank: 1, routable: true, tools: true, aliases: ['gemini-flash', 'flash'] },
+  { model: 'gemini-3.5-flash-lite', provider: 'gemini', intelligence: 88, costRank: 1, routable: true, tools: true, aliases: ['gemini-flash', 'flash'] },
   { model: 'gemini-3.1-pro-high', provider: 'antigravity', intelligence: 93, costRank: 1, routable: true, tools: false, aliases: [] },
   { model: 'gemini-3.1-pro-low', provider: 'antigravity', intelligence: 90, costRank: 1, routable: true, tools: false, aliases: [] },
   { model: 'gemini-3.8-flash-high', provider: 'antigravity', intelligence: 87, costRank: 1, routable: true, tools: false, aliases: [] },

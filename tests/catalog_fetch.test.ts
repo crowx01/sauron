@@ -206,7 +206,7 @@ describe('Sauron Catalog Dynamic Fetch & Cache Suite', () => {
     expect(orClaude?.routable).toBe(false);
 
     // Must contain static non-Claude entries
-    const geminiFlash = catalog.find((m) => m.model === 'gemini-2.0-flash');
+    const geminiFlash = catalog.find((m) => m.model === 'gemini-3.5-flash-lite');
     expect(geminiFlash).toBeDefined();
     expect(geminiFlash?.routable).toBe(true);
 
@@ -264,7 +264,7 @@ describe('Sauron Catalog Dynamic Fetch & Cache Suite', () => {
     expect(cat.find((m) => m.model === 'gpt-4o')).toBeDefined();
     expect(cat.find((m) => m.model === 'deepseek/deepseek-r1')).toBeDefined();
     expect(cat.find((m) => m.model === 'custom-adversarial-test')).toBeDefined();
-    expect(cat.find((m) => m.model === 'gemini-2.0-flash')).toBeDefined();
+    expect(cat.find((m) => m.model === 'gemini-3.5-flash-lite')).toBeDefined();
 
     // Static Claude openrouter entry remains routable: false
     const orClaude = cat.find((m) => m.model === 'anthropic/claude-3.5-sonnet');

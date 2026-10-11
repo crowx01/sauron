@@ -483,7 +483,7 @@ export class OpenCodeEngine {
       case 'COPY_LAST_RESPONSE': this.copyLastAssistantMessage(); break;
       case 'TOGGLE_MOUSE_MODE': this.toggleMouseTracking(); break;
       case 'CYCLE_QUICK_MODEL':
-        const models = ['claude-3-7-sonnet', 'gpt-4o', 'gemini-2.0-flash'];
+        const models = ['claude-3-7-sonnet', 'gpt-4o', 'gemini-3.5-flash-lite'];
         const cur = chatRouter.getDefaultModel();
         const next = models[(models.indexOf(cur) + 1) % models.length];
         chatRouter.setDefaultModel(next);
