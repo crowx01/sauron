@@ -189,6 +189,7 @@ export class ActionCache {
 
       let bestMatch: ActionCacheEntry | undefined;
       let highestSim = 0;
+      const queryValues = Object.values(slots).sort();
 
       for (const row of rows) {
         const rowSlotTypes = extractSlotTypes(row.promptSkeleton);
@@ -197,6 +198,20 @@ export class ActionCache {
         if (querySlotTypes.length !== rowSlotTypes.length) continue;
         const slotsMatch = querySlotTypes.every((val, idx) => val === rowSlotTypes[idx]);
         if (!slotsMatch) continue;
+
+        // instantiatedSequence below replays the stored response VERBATIM -- there is no
+        // mechanism to re-substitute slot values into free-text model output (e.g. you cannot
+        // turn a cached "hi x20" response into "hi x30" by string-patching it). So a cache hit
+        // is only safe when the actual slot VALUES also match exactly, not just their types.
+        // Without this, "say hi 30 times" matched "say hi 20 times" (same skeleton/types) and
+        // replayed the wrong count verbatim. See 2026-10-11 regression.
+        let rowValues: string[];
+        try {
+          rowValues = Object.values(JSON.parse(row.paramSlots || '{}') as Record<string, string>).sort();
+        } catch {
+          rowValues = [];
+        }
+        if (rowValues.length !== queryValues.length || rowValues.some((v, idx) => v !== queryValues[idx])) continue;
 
         const sim = jaccardSimilarity(skeleton, row.promptSkeleton);
         if (sim >= 0.90 && sim > highestSim) {

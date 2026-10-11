@@ -59,11 +59,21 @@ export class ChatRouter {
     };
   }
 
-  public getCachedClassification(sessionId: string): TaskClassification | undefined {
-    const entry = this.classificationCache.get(sessionId);
+  // Cache key MUST include the message content, not just sessionId: classification is a
+  // property of (what was said), not of (which session this is). A sessionId-only key meant
+  // every message in a session reused the FIRST message's classification for the whole TTL --
+  // e.g. one "hi" (classified chitchat) silently routed every later "say hi 20 times" /
+  // "say hi 30 times" in that session to local-engine's canned echo. Fixed 2026-10-11.
+  private classificationCacheKey(sessionId: string, promptText: string): string {
+    return `${sessionId}::${promptText.trim().toLowerCase().slice(0, 300)}`;
+  }
+
+  public getCachedClassification(sessionId: string, promptText: string): TaskClassification | undefined {
+    const key = this.classificationCacheKey(sessionId, promptText);
+    const entry = this.classificationCache.get(key);
     if (!entry) return undefined;
     if (Date.now() > entry.expiresAt) {
-      this.classificationCache.delete(sessionId);
+      this.classificationCache.delete(key);
       return undefined;
     }
     return entry.classification;
@@ -71,10 +81,11 @@ export class ChatRouter {
 
   public setCachedClassification(
     sessionId: string,
+    promptText: string,
     classification: TaskClassification,
     ttlMs: number = 120_000
   ): void {
-    this.classificationCache.set(sessionId, {
+    this.classificationCache.set(this.classificationCacheKey(sessionId, promptText), {
       classification,
       expiresAt: Date.now() + ttlMs
     });
@@ -406,8 +417,12 @@ Task: ${promptText}`;
     // Available real providers (excluding local-engine)
     const realAvailable = available.filter((p) => p !== 'local-engine');
 
-    const sessionId = options.sessionId || sessionStore.getActiveSession()?.id || 'default';
-    const classification = options.classification ?? this.getCachedClassification(sessionId);
+    // No promptText is available at this layer, so there is no safe content-keyed cache
+    // lookup here — route() relies on dispatch()/routeAsync() to have already resolved and
+    // passed options.classification. A sessionId-only fallback here was the source of the
+    // "stuck on first message's classification for the whole session" bug (see
+    // classificationCacheKey's note); do not reintroduce it.
+    const classification = options.classification;
 
     if (!targetModel || targetModel === 'auto') {
       // Claude (anthropic/openrouter-claude/claude-cli) is never an auto cheap/smart pick —
@@ -510,15 +525,18 @@ Task: ${promptText}`;
     const sessionId = options.sessionId || sessionStore.getActiveSession()?.id || 'default';
 
     if ((!options.model || options.model === 'auto') && mode === 'auto' && !classification) {
-      classification = this.getCachedClassification(sessionId);
+      const promptTextForCache = messages && messages.length > 0
+        ? [...messages].reverse().find((m) => m.role === 'user')?.content || ''
+        : '';
+      classification = promptTextForCache ? this.getCachedClassification(sessionId, promptTextForCache) : undefined;
       if (!classification && messages && messages.length > 0) {
-        const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+        const promptText = promptTextForCache;
         if (promptText) {
           classification = this.isTrivialChitchat(promptText)
             ? this.trivialClassification()
             : (await this.classifyTask(promptText, options)) ?? undefined;
           if (classification) {
-            this.setCachedClassification(sessionId, classification);
+            this.setCachedClassification(sessionId, promptText, classification);
           }
         }
       }
@@ -558,17 +576,18 @@ Task: ${promptText}`;
     // 1. Cheap local classifier step in 'auto' mode before route()'s complexity sort
     let classification = options.classification;
     if ((!options.model || options.model === 'auto') && mode === 'auto') {
-      if (!classification) {
-        classification = this.getCachedClassification(sessionId);
+      const dispatchPromptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+      if (!classification && dispatchPromptText) {
+        classification = this.getCachedClassification(sessionId, dispatchPromptText);
       }
       if (!classification) {
-        const promptText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+        const promptText = dispatchPromptText;
         if (promptText) {
           classification = this.isTrivialChitchat(promptText)
             ? this.trivialClassification()
             : (await this.classifyTask(promptText, options)) ?? undefined;
           if (classification) {
-            this.setCachedClassification(sessionId, classification);
+            this.setCachedClassification(sessionId, promptText, classification);
           }
         }
       }

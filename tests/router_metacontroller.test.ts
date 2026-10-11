@@ -12,9 +12,14 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
   });
 
   // -------------------------------------------------------------
-  // ITEM 1: Cheap Local Classifier Step & Per-Session Caching
+  // ITEM 1: Cheap Local Classifier Step & Per-Message Caching
   // -------------------------------------------------------------
-  test('Item 1.1: Session classification cache stores and retrieves within TTL', () => {
+  // NOTE (2026-10-11): cache key MUST include the prompt text, not just sessionId. A
+  // sessionId-only key meant every message in a session reused the FIRST message's
+  // classification for the whole TTL (e.g. one "hi" classified as chitchat silently routed
+  // every later "say hi 20 times" in that session to local-engine). See
+  // ChatRouter.classificationCacheKey's note in src/router/index.ts.
+  test('Item 1.1: Classification cache stores and retrieves per (session, prompt) within TTL', () => {
     const sample: TaskClassification = {
       category: 'recon',
       domain: 'recon',
@@ -23,16 +28,19 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
       confidence: 0.7
     };
 
-    chatRouter.setCachedClassification('sess_test_1', sample, 1000);
-    const cached = chatRouter.getCachedClassification('sess_test_1');
+    chatRouter.setCachedClassification('sess_test_1', 'scan the target', sample, 1000);
+    const cached = chatRouter.getCachedClassification('sess_test_1', 'scan the target');
     expect(cached).toBeDefined();
     expect(cached?.category).toBe('recon');
     expect(cached?.planDepth).toBe(4);
     expect(cached?.ambiguity).toBe(0.3);
 
+    // A different message in the SAME session must NOT hit the first message's cache entry.
+    expect(chatRouter.getCachedClassification('sess_test_1', 'say hi 20 times')).toBeUndefined();
+
     // Expired TTL should return undefined
-    chatRouter.setCachedClassification('sess_expired', sample, -1);
-    expect(chatRouter.getCachedClassification('sess_expired')).toBeUndefined();
+    chatRouter.setCachedClassification('sess_expired', 'scan the target', sample, -1);
+    expect(chatRouter.getCachedClassification('sess_expired', 'scan the target')).toBeUndefined();
   });
 
   test('Item 1.2: classifyTask degrades gracefully when providers are unavailable or fail', async () => {
@@ -217,7 +225,7 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
     expect(jaccardSimilarity(t1.skeleton, t3.skeleton)).toBeLessThan(0.5);
   });
 
-  test('Item 1.9: actionCache stores, looks up on >= 0.90 similarity, and replays sequence', async () => {
+  test('Item 1.9: actionCache stores, replays on an exact repeat, and refuses a hit on changed slot values', async () => {
     const { actionCache } = require('../src/router/action_cache');
     actionCache.clear();
 
@@ -232,15 +240,22 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
       dagOrToolSequence: sampleDAG
     });
 
-    // Same skeleton with different IP parameter
-    const lookup = actionCache.lookup('enumerate hosts at 10.0.0.99');
-    expect(lookup.hit).toBe(true);
-    expect(lookup.similarity).toBeGreaterThanOrEqual(0.90);
-    expect(lookup.entry?.providerUsed).toBe('test-prov');
+    // Replaying the stored sequence verbatim is only safe when the actual slot VALUES match
+    // too (same skeleton + same values = a true exact-prompt repeat), not just the slot TYPES.
+    // A different IP must NOT hit -- it would otherwise silently replay a recon/exploit action
+    // against the wrong target. See the 2026-10-11 "repeat hi 20/30 times" regression that
+    // exposed this same class of bug (type-only matching replaying the wrong parameter).
+    const differentIpLookup = actionCache.lookup('enumerate hosts at 10.0.0.99');
+    expect(differentIpLookup.hit).toBe(false);
 
-    // Test dispatch with cache hit
+    const sameIpLookup = actionCache.lookup('enumerate hosts at 192.168.1.1');
+    expect(sameIpLookup.hit).toBe(true);
+    expect(sameIpLookup.similarity).toBeGreaterThanOrEqual(0.90);
+    expect(sameIpLookup.entry?.providerUsed).toBe('test-prov');
+
+    // Test dispatch with cache hit (exact same prompt as stored)
     const userMsgs: Message[] = [
-      { id: 'msg1', role: 'user', content: 'enumerate hosts at 10.0.0.99', timestamp: Date.now() }
+      { id: 'msg1', role: 'user', content: 'enumerate hosts at 192.168.1.1', timestamp: Date.now() }
     ];
 
     const deltas: string[] = [];
