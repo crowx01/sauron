@@ -1,4 +1,0 @@
-{
-  "_comment": "HuggingFace router models (OpenAI-compatible). org/model ids. DISABLED 2026-10-08: HF Inference account has no remaining credits (every call 402). Re-add models here once credits/PRO are restored.",
-  "models": []
-}
