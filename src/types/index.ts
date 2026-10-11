@@ -65,6 +65,10 @@ export interface StreamChunk {
   modelUsed?: string;
   providerUsed?: string;
   error?: string;
+  /** Transient progress note (e.g. "Waiting for Antigravity response (10s)...") for providers
+   * that buffer their whole answer and emit nothing until fully done. Not part of the final
+   * response text -- UIs should render it as ephemeral status, not append it to message content. */
+  statusNote?: string;
 }
 
 export interface Session {

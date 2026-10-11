@@ -42,6 +42,7 @@ async function main() {
       sessionStore.addMessage('user', prompt);
       const messages = sessionStore.getActiveSession().messages;
       for await (const chunk of chatRouter.dispatch(messages)) {
+        if (chunk.statusNote) process.stderr.write(`\r[${chunk.statusNote}]`);
         if (chunk.delta) process.stdout.write(chunk.delta);
       }
       console.log('\n');

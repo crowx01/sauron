@@ -7,6 +7,7 @@ import { themeStore, fg, fgBg, bold, dim, padToWidth, visibleLen, ThemeTokens } 
 import { keymapRegistry, cyclePromptMode } from './keymaps';
 import { modalManager } from './modals';
 import { SessionTabBar, SidebarPane, MessageCardRenderer, PromptComposer } from './views';
+import { stripAnsi, highlightVisibleRange } from './components';
 import { sessionStore } from '../session';
 import { chatRouter } from '../router';
 import { toolBelt } from '../tools';
@@ -44,11 +45,19 @@ export class OpenCodeEngine {
   private historyIndex = -1;
   private promptHistory: string[] = [];
   private isBusy = false;
+  /** Transient progress note from a provider that buffers its whole answer (e.g. antigravity's
+   * agy CLI doesn't stream) -- surfaces "Waiting for Antigravity response (Ns)..." instead of a
+   * frozen spinner with zero feedback. Read by views.ts's footer render; cleared on completion. */
+  public busyStatusNote = '';
   private sidebarVisible = true;
   private slashSelectedIndex = 0;
   private mouseTrackingEnabled = true;
   private inBracketedPaste = false;
   private bracketedPasteBuffer = '';
+  private isSelecting = false;
+  private selection: { startCol: number; startRow: number; endCol: number; endRow: number } | null = null;
+  private hasActiveSelection = false;
+  private lastScreenRows: string[] = [];
 
   private tabBar = new SessionTabBar();
   private sidebar = new SidebarPane();
@@ -67,8 +76,8 @@ export class OpenCodeEngine {
   public start() {
     if (this.isRaw) return;
 
-    // Enter alternate screen buffer, enable SGR 1000/1006 mouse tracking, hide cursor, and enable bracketed paste mode (\x1b[?2004h)
-    process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[?2004h');
+    // Enter alternate screen buffer, enable SGR 1002/1006 mouse tracking, hide cursor, and enable bracketed paste mode (\x1b[?2004h)
+    process.stdout.write('\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[?25l\x1b[?2004h');
 
     if (process.stdin.setRawMode) {
       process.stdin.setRawMode(true);
@@ -103,7 +112,7 @@ export class OpenCodeEngine {
     }
 
     // Disable bracketed paste mode (\x1b[?2004l), disable mouse tracking, show cursor & leave alternate screen
-    process.stdout.write('\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l');
+    process.stdout.write('\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l');
 
     if (error) {
       console.error('\n[SAURON TUI PANIC RECOVERY]:', error);
@@ -115,10 +124,10 @@ export class OpenCodeEngine {
   private toggleMouseTracking() {
     this.mouseTrackingEnabled = !this.mouseTrackingEnabled;
     if (this.mouseTrackingEnabled) {
-      process.stdout.write('\x1b[?1000h\x1b[?1006h');
-      this.notify('Mouse wheel scrolling enabled (Hold Shift to highlight/copy text natively).');
+      process.stdout.write('\x1b[?1002h\x1b[?1006h');
+      this.notify('Mouse wheel scrolling & drag-selection enabled.');
     } else {
-      process.stdout.write('\x1b[?1006l\x1b[?1000l');
+      process.stdout.write('\x1b[?1006l\x1b[?1002l\x1b[?1000l');
       this.notify('Native mouse text selection enabled! (Mouse scroll disabled).');
     }
   }
@@ -135,26 +144,168 @@ export class OpenCodeEngine {
     this.notify('Copied last assistant response to system clipboard!');
   }
 
-  private copyToClipboard(text: string) {
-    // 1. Send OSC 52 clipboard escape sequence
+  public copyToClipboard(text: string) {
+    if (!text) return;
+    // 1. Send OSC 52 clipboard escape sequence (both clipboard 'c' and primary 'p')
     try {
       const base64 = Buffer.from(text).toString('base64');
       process.stdout.write(`\x1b]52;c;${base64}\x07`);
+      process.stdout.write(`\x1b]52;p;${base64}\x07`);
     } catch {}
 
-    // 2. Try native OS clipboard utility
+    // 2. Try native OS clipboard utilities
     try {
       const { exec } = require('child_process');
       if (process.platform === 'linux') {
-        const proc = exec('xclip -selection clipboard || wl-copy || xsel --clipboard');
-        proc.stdin.write(text);
-        proc.stdin.end();
+        const procClip = exec('xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null || xsel --clipboard 2>/dev/null');
+        procClip.stdin.write(text);
+        procClip.stdin.end();
+        const procPrim = exec('xclip -selection primary 2>/dev/null || xsel --primary 2>/dev/null');
+        procPrim.stdin.write(text);
+        procPrim.stdin.end();
       } else if (process.platform === 'darwin') {
         const proc = exec('pbcopy');
         proc.stdin.write(text);
         proc.stdin.end();
       }
     } catch {}
+  }
+
+  public extractSelectedText(
+    start: { col: number; row: number },
+    end: { col: number; row: number }
+  ): string {
+    let r1 = start.row;
+    let c1 = start.col;
+    let r2 = end.row;
+    let c2 = end.col;
+
+    if (r1 > r2 || (r1 === r2 && c1 > c2)) {
+      const tr = r1; const tc = c1;
+      r1 = r2; c1 = c2;
+      r2 = tr; c2 = tc;
+    }
+
+    const lines: string[] = [];
+    for (let r = r1; r <= r2; r++) {
+      const idx = r - 1;
+      if (idx < 0 || idx >= this.lastScreenRows.length) continue;
+      const plain = stripAnsi(this.lastScreenRows[idx]);
+
+      let slice = '';
+      if (r1 === r2) {
+        slice = plain.slice(Math.max(0, c1 - 1), Math.max(0, c2));
+      } else if (r === r1) {
+        slice = plain.slice(Math.max(0, c1 - 1));
+      } else if (r === r2) {
+        slice = plain.slice(0, Math.max(0, c2));
+      } else {
+        slice = plain;
+      }
+
+      lines.push(slice.trimEnd());
+    }
+
+    return lines.join('\n');
+  }
+
+  private handleSingleClick(col: number, row: number) {
+    this.hasActiveSelection = false;
+    this.selection = null;
+
+    // Check if clicked in prompt composer input area
+    const composerLines = this.composer.renderPrompt(
+      this.promptBuffer,
+      this.cursorOffset,
+      this.width,
+      this.isBusy,
+      themeStore.getTheme()
+    );
+    const mainH = Math.max(3, this.height - 1 - composerLines.length);
+    const promptBoxTopRow = 2 + mainH; // 1-indexed row of top border ┌───┐
+
+    // Input lines are from promptBoxTopRow + 1
+    const promptLines = this.promptBuffer.split('\n');
+    const lineIndex = row - promptBoxTopRow - 1;
+
+    if (lineIndex >= 0 && lineIndex < promptLines.length) {
+      let offset = 0;
+      for (let i = 0; i < lineIndex; i++) {
+        offset += promptLines[i].length + 1;
+      }
+      const clickCol = Math.max(0, Math.min(promptLines[lineIndex].length, col - 3));
+      this.cursorOffset = offset + clickCol;
+    }
+  }
+
+  public handleMouseEvent(btn: number, col: number, row: number, isRelease: boolean) {
+    // 1. Mouse wheel
+    if (btn === 64 || btn === 68 || btn === 72 || btn === 80) {
+      this.scrollOffset += 3;
+      this.render();
+      return;
+    }
+    if (btn === 65 || btn === 69 || btn === 73 || btn === 81) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - 3);
+      this.render();
+      return;
+    }
+
+    // 2. Middle click (paste clipboard)
+    if (btn === 1 && !isRelease) {
+      const text = this.pasteFromClipboard();
+      if (text) {
+        this.handlePastedText(text);
+      }
+      return;
+    }
+
+    // 3. Left click press (btn 0, !isRelease)
+    if (btn === 0 && !isRelease) {
+      this.isSelecting = true;
+      this.selection = { startCol: col, startRow: row, endCol: col, endRow: row };
+      this.hasActiveSelection = false;
+      return;
+    }
+
+    // 4. Left button drag motion (btn 32, !isRelease)
+    if (btn === 32 && !isRelease) {
+      if (this.isSelecting && this.selection) {
+        this.selection.endCol = col;
+        this.selection.endRow = row;
+        this.hasActiveSelection = (this.selection.startRow !== row || this.selection.startCol !== col);
+        this.render();
+      }
+      return;
+    }
+
+    // 5. Left button release (btn 0, isRelease)
+    if (btn === 0 && isRelease) {
+      if (this.isSelecting && this.selection) {
+        this.isSelecting = false;
+        this.selection.endCol = col;
+        this.selection.endRow = row;
+
+        if (this.selection.startRow !== row || this.selection.startCol !== col) {
+          const selectedText = this.extractSelectedText(
+            { col: this.selection.startCol, row: this.selection.startRow },
+            { col: this.selection.endCol, row: this.selection.endRow }
+          );
+          if (selectedText.trim().length > 0) {
+            this.copyToClipboard(selectedText);
+            this.hasActiveSelection = true;
+            this.notify(`Copied selection to clipboard! (${selectedText.length} chars)`);
+          } else {
+            this.hasActiveSelection = false;
+            this.selection = null;
+          }
+        } else {
+          this.handleSingleClick(col, row);
+        }
+        this.render();
+      }
+      return;
+    }
   }
 
   private getFilteredSlashCommands(): SlashCommandDef[] {
@@ -251,6 +402,30 @@ export class OpenCodeEngine {
   }
 
   private handleInput(str: string) {
+    // Process SGR Mouse events if present
+    const mouseMatches: RegExpExecArray[] = [];
+    const mouseRe = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+    let match: RegExpExecArray | null;
+    while ((match = mouseRe.exec(str)) !== null) {
+      mouseMatches.push(match);
+    }
+    if (mouseMatches.length > 0) {
+      for (const m of mouseMatches) {
+        const btn = parseInt(m[1], 10);
+        const col = parseInt(m[2], 10);
+        const row = parseInt(m[3], 10);
+        const isRelease = m[4] === 'm';
+        this.handleMouseEvent(btn, col, row, isRelease);
+      }
+      return;
+    }
+
+    // Keyboard action clears active selection highlight
+    if (this.hasActiveSelection) {
+      this.hasActiveSelection = false;
+      this.selection = null;
+    }
+
     const key = this.parseKey(str);
 
     // Direct Clipboard Paste: Ctrl+V, \x16, or Shift+Insert (\x1b[2;2~, \x1b[2~)
@@ -617,7 +792,7 @@ export class OpenCodeEngine {
   }
 
   private promptQueue: string[] = [];
-  private spinnerTimer: Timer | null = null;
+  private spinnerTimer: any = null;
 
   private enqueueUserPrompt(text: string) {
     sessionStore.addMessage('user', text);
@@ -642,7 +817,12 @@ export class OpenCodeEngine {
       const activeSession = sessionStore.getActiveSession();
 
       for await (const chunk of chatRouter.dispatch(activeSession.messages)) {
+        if (chunk.statusNote) {
+          this.busyStatusNote = chunk.statusNote;
+          this.render();
+        }
         if (chunk.delta) {
+          if (this.busyStatusNote) this.busyStatusNote = '';
           assistantText += chunk.delta;
           this.render();
         }
@@ -655,6 +835,7 @@ export class OpenCodeEngine {
       sessionStore.addMessage('system', `Error: ${e.message}`);
     } finally {
       this.isBusy = false;
+      this.busyStatusNote = '';
       if (this.spinnerTimer) {
         clearInterval(this.spinnerTimer);
         this.spinnerTimer = null;
@@ -714,12 +895,11 @@ export class OpenCodeEngine {
     const width = this.width;
     const height = this.height;
 
-    // Begin Synchronized Render (\x1b[?2026h)
-    let frame = '\x1b[?2026h\x1b[H\x1b[2J';
+    const screenRows: string[] = [];
 
     // Top: Session Tab Bar
     const activeSession = sessionStore.getActiveSession();
-    frame += this.tabBar.render(width, activeSession.title, sessionStore.listSessions().length, t) + '\n';
+    screenRows.push(this.tabBar.render(width, activeSession.title, sessionStore.listSessions().length, t));
 
     // Bottom: Prompt Composer
     const composerLines = this.composer.renderPrompt(this.promptBuffer, this.cursorOffset, width, this.isBusy, t);
@@ -757,10 +937,51 @@ export class OpenCodeEngine {
     for (let r = 0; r < mainH; r++) {
       const left = this.sidebarVisible ? (sidebarLines[r] || ' '.repeat(sidebarW)) : '';
       const right = visibleTranscript[r] || '';
-      frame += left + right + '\n';
+      screenRows.push(left + right);
     }
 
-    frame += composerLines.join('\n');
+    screenRows.push(...composerLines);
+
+    // Cache unhighlighted lines for mouse selection extraction
+    this.lastScreenRows = [...screenRows];
+
+    // Apply visual selection highlight if active
+    if (this.hasActiveSelection && this.selection) {
+      let r1 = this.selection.startRow;
+      let c1 = this.selection.startCol;
+      let r2 = this.selection.endRow;
+      let c2 = this.selection.endCol;
+
+      if (r1 > r2 || (r1 === r2 && c1 > c2)) {
+        const tr = r1; const tc = c1;
+        r1 = r2; c1 = c2;
+        r2 = tr; c2 = tc;
+      }
+
+      for (let r = r1; r <= r2; r++) {
+        const idx = r - 1;
+        if (idx < 0 || idx >= screenRows.length) continue;
+
+        let sc = 1;
+        let ec = width;
+        if (r1 === r2) {
+          sc = c1;
+          ec = c2;
+        } else if (r === r1) {
+          sc = c1;
+          ec = width;
+        } else if (r === r2) {
+          sc = 1;
+          ec = c2;
+        }
+
+        screenRows[idx] = highlightVisibleRange(screenRows[idx], sc, ec);
+      }
+    }
+
+    // Begin Synchronized Render (\x1b[?2026h)
+    let frame = '\x1b[?2026h\x1b[H\x1b[2J';
+    frame += screenRows.join('\n');
 
     // Overlay: Slash Command Palette Overlay (if buffer starts with /)
     if (modalManager.getActiveModal() === 'none' && this.promptBuffer.startsWith('/')) {
