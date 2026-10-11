@@ -146,7 +146,7 @@ masked_read() {
 # four TAB-separated fields so the installer never scatters URLs/env-vars/shapes:
 #   <env_var> <console_url> <key_regex> <description>
 # key_regex is a loose shape check (warn-not-block); an empty regex means
-# "cannot validate shape". Keep this in sync with core catalog `_auth()`.
+# "cannot validate shape". Keep this in sync with router catalog auth.
 provider_spec() {
   case "$1" in
     groq)       printf '%s\t%s\t%s\t%s\n' CUSTOM_API_KEY     'https://console.groq.com/keys'         '^gsk_[A-Za-z0-9]{20,}$'        'Groq (groq/gpt-oss + qwen3 default tool executor)' ;;

@@ -2,7 +2,7 @@
 
 Context: live failure 2026-10-08 — `sauron run --plan` on a ~7.1k-token spec: qwen3 ate a real 413 (size_guard under-counted because it measured prompt only, not system+tools), then fallback tried two dead HuggingFace models (402 no credits) before the working big-context model. flash-lite later stalled at max-steps authoring a large script. Deterministic cleanup (parse+curl) needed no LLM at all. Goal: merge model strengths per-subtask with a typed fallback policy so missions finish without these errors.
 
-Repo: /home/kali/tools/sauron-work/sauron/core (branch off main; run tests in core/.sauron_venv).
+Repo: /home/kali/tools/sauron-work/sauron (Bun / TypeScript engine).
 
 ## P1 — size_guard counts the WHOLE request (fixes the slipped 413)
 File: providers/router/size_guard.py
@@ -32,6 +32,6 @@ File: providers/router/mission.py
 ## Tests (extend existing)
 - tests/test_size_guard.py: system+tools+overhead push a near-cap prompt over → route hint; margin respected.
 - tests/test_fallback_chain.py: 413 reorders to biggest-cap peer first; 402 quarantines the provider prefix and subsequent chains skip it.
-Run: `core/.sauron_venv/bin/python -m pytest tests/test_size_guard.py tests/test_fallback_chain.py -q`.
+Run: `bun test tests/stress_and_lifecycle.test.ts tests/adversarial.test.ts`.
 
 Deliverable: unified diff per file + passing tests. Preserve all unrelated behavior; new behavior env-guarded and defaulted safe.

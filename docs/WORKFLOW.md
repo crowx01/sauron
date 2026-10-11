@@ -4,7 +4,7 @@ From cold box to shipping a finding, without burning Claude's context on busy wo
 
 ## 1. One-time install (5 min)
 
-1. Install sauron — the core engine (crowx01's routing-enhanced fork with capability-rank cross-provider auto model selection) now ships **bundled inside sauron at `./core`**, no separate download. On the claude-code path `setup.sh` provisions and registers it for you under `mcpServers.pal`; for other orchestrators, start it with `sauron serve` or register `core/server.py` there manually. (Lineage: BeehiveInnovations/pal-mcp-server, formerly zen-mcp-server; this fork carries the smarter routing.)
+1. Install sauron — the native TypeScript/Bun engine runs directly via the `sauron` CLI (`src/cli.ts` on Bun v1.4+). Run `bun install` to install dependencies. `./setup.sh` configures orchestrator hooks, skills, and routing rules with zero Python runtime dependencies.
 2. Clone the pentesting knowledge base (https://github.com/Darxbloo/Pentesting-Agent-new) and copy its `skills/` and `agents/` into `~/.claude/`. It supplies `pentesting-agent` and `validator`, which the generated hook auto-loads; sauron does not ship them.
 3. Clone this repo.
 4. Run `./setup.sh` from the sauron root. The wizard walks you through:
