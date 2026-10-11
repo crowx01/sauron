@@ -168,7 +168,7 @@ export class PromptComposer {
   private spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   private spinnerIndex = 0;
 
-  public renderPrompt(buffer: string, cursorOffset: number, width: number, isBusy: boolean, t: ThemeTokens): string[] {
+  public renderPrompt(buffer: string, cursorOffset: number, width: number, isBusy: boolean, t: ThemeTokens, statusNote?: string): string[] {
     const lines: string[] = [];
     const boxW = width;
     const border = '─'.repeat(boxW - 2);
@@ -181,34 +181,72 @@ export class PromptComposer {
 
     lines.push(fg(t.border.focus, `┌${border}┐`));
 
-    // Render multiline input with cursor
+    // Render multiline input with cursor and viewport windowing
     const cur = Math.max(0, Math.min(buffer.length, cursorOffset));
     const linesText = buffer.split('\n');
+    const maxInnerW = Math.max(10, boxW - 4);
+    const MAX_VISIBLE_ROWS = 8;
+    let cursorLine = 0;
+
     if (linesText.length === 0 || buffer === '') {
-      lines.push(`│ ${padToWidth(`${modeBadge} ${dim('Type prompt, @file, /command, or !shell...')}█`, boxW - 4)} │`);
+      lines.push(`│ ${padToWidth(`${modeBadge} ${dim('Type prompt, @file, /command, or !shell...')}█`, maxInnerW)} │`);
     } else {
+      // Find cursor line
+      let posTracker = 0;
+      for (let i = 0; i < linesText.length; i++) {
+        const lineEnd = posTracker + linesText[i].length;
+        if (cur >= posTracker && cur <= lineEnd) {
+          cursorLine = i;
+          break;
+        }
+        posTracker = lineEnd + 1;
+      }
+
+      // Window visible lines if more than MAX_VISIBLE_ROWS
+      let startLineIdx = 0;
+      let endLineIdx = linesText.length;
+      if (linesText.length > MAX_VISIBLE_ROWS) {
+        startLineIdx = Math.max(0, Math.min(linesText.length - MAX_VISIBLE_ROWS, cursorLine - 3));
+        endLineIdx = Math.min(linesText.length, startLineIdx + MAX_VISIBLE_ROWS);
+      }
+
       let lineStart = 0;
       for (let i = 0; i < linesText.length; i++) {
         const rawL = linesText[i];
         const col = cur - lineStart;
         const isCurrentLine = col >= 0 && col <= rawL.length;
-        
+        lineStart += rawL.length + 1;
+
+        if (i < startLineIdx || i >= endLineIdx) continue;
+
         let l = rawL;
         if (isCurrentLine) {
           const under = col < rawL.length ? rawL[col] : ' ';
           l = rawL.slice(0, col) + '\x1b[7m' + under + '\x1b[27m' + (col < rawL.length ? rawL.slice(col + 1) : '');
         }
-        lineStart += rawL.length + 1;
+
+        // Horizontal windowing if line is wider than maxInnerW
+        if (visibleLen(l) > maxInnerW) {
+          if (isCurrentLine) {
+            const hStart = Math.max(0, Math.min(rawL.length - maxInnerW, col - Math.floor(maxInnerW / 2)));
+            l = l.slice(hStart, hStart + maxInnerW);
+          } else {
+            l = l.slice(0, maxInnerW);
+          }
+        }
+
         const formatted = rawL.startsWith('!') ? fg(t.text.error, l) : rawL.startsWith('/') ? fg(t.text.action, l) : l;
-        lines.push(`│ ${padToWidth(formatted, boxW - 4)} │`);
+        lines.push(`│ ${padToWidth(formatted, maxInnerW)} │`);
       }
     }
 
-    lines.push(fg(t.border.focus, `├${border}┤`));
+    const scrollHint = linesText.length > MAX_VISIBLE_ROWS ? ` [Showing lines ${cursorLine + 1}/${linesText.length}]` : '';
+    lines.push(fg(t.border.focus, `├${border.slice(0, Math.max(0, border.length - scrollHint.length))}${scrollHint}┤`));
 
     // Assistant Footer
     this.spinnerIndex = (this.spinnerIndex + 1) % this.spinnerFrames.length;
-    const spinStr = isBusy ? fg(t.text.warning, `${this.spinnerFrames[this.spinnerIndex]} Thinking...`) : fg(t.text.success, '● Ready');
+    const busyLabel = statusNote ? statusNote : 'Thinking...';
+    const spinStr = isBusy ? fg(t.text.warning, `${this.spinnerFrames[this.spinnerIndex]} ${busyLabel}`) : fg(t.text.success, '● Ready');
     const modelBadge = fgBg(t.text.base, t.background.activeTab, ` ${chatRouter.getDefaultModel()} `);
     const agentBadge = fg(t.text.extmarkAgent, ' [Sauron Agent] ');
 
