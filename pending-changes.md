@@ -49,9 +49,23 @@ This log documents all file changes, additions, modifications, and removals perf
 
 ---
 
+## Step 1: Codebase Reference Audit Pass
+Comprehensive grep across `src/`, `bin/`, `package.json`, `setup.sh`, `scripts/`, `tests/`, and `docs/` for any references to `core/`:
+- **`src/`**: **0 references**. The entire runtime engine is pure TypeScript/Bun with zero imports or subprocess calls to `core/` or Python.
+- **`bin/cli.js`**: **0 references**. The CLI router delegates execution exclusively to `bun run src/cli.ts` (with `findBun()` fallback).
+- **`bin/sauron-normalize` & `bin/strip-noise`**: Standalone JS scripts with zero dependencies on Python.
+- **`bin/setup-lib.sh`**: 1 cosmetic comment referencing catalog `_auth()` behavior; no runtime Python calls.
+- **`package.json`**: Only references `@opentui/core` (npm package), 0 references to `./core/`.
+- **`setup.sh`**: Contains legacy MCP registration function `register_pal()` targeting `core/server.py` and `core/.sauron_venv/bin/python`. This will be modernized to the Bun/TS workflow in Step 4.
+- **`docs/`**: `docs/WORKFLOW.md`, `docs/install-walkthrough.html`, and `.env.example` contain legacy documentation pointing to `./core` and Python virtualenv. These will be updated in Step 4.
+- **Conclusion**: The live engine is 100% isolated from `core/`. No load-bearing runtime paths depend on `core/`.
+
+---
+
 ## Verification Summary
 - **Bun Automated Test Suites**: **87 pass, 0 fail, 2784 expect() calls across 8 test files** (`bun test`).
 - **CLI Commands Verified**: `sauron chat`, `sauron diag`, `sauron models`, `sauron run`, `sauron mission`, `sauron debate`, `sauron sessions`, `sauron selftest`.
 - **Zero Python Invocations**: Verified 0 Python processes spawned during any production CLI execution.
+
 
 
