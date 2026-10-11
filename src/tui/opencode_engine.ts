@@ -28,6 +28,8 @@ export const ALL_SLASH_COMMANDS: SlashCommandDef[] = [
   { cmd: '/palette', usage: '/palette', desc: 'Open fuzzy command palette dialog', badge: 'PALETTE' },
   { cmd: '/keys', usage: '/keys', desc: 'View keyboard shortcuts & leader bindings', badge: 'HELP' },
   { cmd: '/new', usage: '/new', desc: 'Start a fresh conversation session', badge: 'NEW' },
+  { cmd: '/copy', usage: '/copy', desc: 'Copy last assistant message to system clipboard', badge: 'COPY' },
+  { cmd: '/mouse', usage: '/mouse', desc: 'Toggle mouse tracking on/off (enables native selection)', badge: 'TOGGLE' },
   { cmd: '/quit', usage: '/quit', desc: 'Exit Sauron TUI cleanly', badge: 'EXIT' },
   { cmd: '/help', usage: '/help', desc: 'Show interactive help reference', badge: 'HELP' },
 ];
@@ -44,6 +46,7 @@ export class OpenCodeEngine {
   private isBusy = false;
   private sidebarVisible = true;
   private slashSelectedIndex = 0;
+  private mouseTrackingEnabled = true;
 
   private tabBar = new SessionTabBar();
   private sidebar = new SidebarPane();
@@ -105,6 +108,51 @@ export class OpenCodeEngine {
       process.exit(1);
     }
     process.exit(0);
+  }
+
+  private toggleMouseTracking() {
+    this.mouseTrackingEnabled = !this.mouseTrackingEnabled;
+    if (this.mouseTrackingEnabled) {
+      process.stdout.write('\x1b[?1000h\x1b[?1006h');
+      this.notify('Mouse wheel scrolling enabled (Hold Shift to highlight/copy text natively).');
+    } else {
+      process.stdout.write('\x1b[?1006l\x1b[?1000l');
+      this.notify('Native mouse text selection enabled! (Mouse scroll disabled).');
+    }
+  }
+
+  private copyLastAssistantMessage() {
+    const activeSession = sessionStore.getActiveSession();
+    const assistantMsgs = activeSession.messages.filter((m) => m.role === 'assistant');
+    if (assistantMsgs.length === 0) {
+      this.notify('No assistant message to copy.');
+      return;
+    }
+    const lastMsg = assistantMsgs[assistantMsgs.length - 1].content;
+    this.copyToClipboard(lastMsg);
+    this.notify('Copied last assistant response to system clipboard!');
+  }
+
+  private copyToClipboard(text: string) {
+    // 1. Send OSC 52 clipboard escape sequence
+    try {
+      const base64 = Buffer.from(text).toString('base64');
+      process.stdout.write(`\x1b]52;c;${base64}\x07`);
+    } catch {}
+
+    // 2. Try native OS clipboard utility
+    try {
+      const { exec } = require('child_process');
+      if (process.platform === 'linux') {
+        const proc = exec('xclip -selection clipboard || wl-copy || xsel --clipboard');
+        proc.stdin.write(text);
+        proc.stdin.end();
+      } else if (process.platform === 'darwin') {
+        const proc = exec('pbcopy');
+        proc.stdin.write(text);
+        proc.stdin.end();
+      }
+    } catch {}
   }
 
   private getFilteredSlashCommands(): SlashCommandDef[] {
@@ -388,6 +436,12 @@ export class OpenCodeEngine {
       case '/new':
         sessionStore.createSession('New Session');
         return true;
+      case '/copy':
+        this.copyLastAssistantMessage();
+        return true;
+      case '/mouse':
+        this.toggleMouseTracking();
+        return true;
       case '/clear':
         if (arg === 'all' || arg === 'sessions') {
           sessionStore.clearAllSessions();
@@ -405,7 +459,7 @@ export class OpenCodeEngine {
         this.stop();
         return true;
       case '/help':
-        this.notify('Commands: /model [name] /theme [name] /sessions [clear] /clear [all] /compact /palette /keys /new /quit /help');
+        this.notify('Commands: /model [name] /theme [name] /sessions [clear] /clear [all] /compact /copy /mouse /palette /keys /new /quit /help');
         return true;
       default:
         this.notify(`Unknown command ${cmd}. Type /help.`);
@@ -426,6 +480,8 @@ export class OpenCodeEngine {
       case 'TOGGLE_SIDEBAR': this.sidebarVisible = !this.sidebarVisible; break;
       case 'NEW_SESSION': sessionStore.createSession('New Session'); break;
       case 'COMPACT_CONTEXT': sessionStore.compactContext(); break;
+      case 'COPY_LAST_RESPONSE': this.copyLastAssistantMessage(); break;
+      case 'TOGGLE_MOUSE_MODE': this.toggleMouseTracking(); break;
       case 'CYCLE_QUICK_MODEL':
         const models = ['claude-3-7-sonnet', 'gpt-4o', 'gemini-2.0-flash'];
         const cur = chatRouter.getDefaultModel();
