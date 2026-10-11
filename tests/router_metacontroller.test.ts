@@ -67,10 +67,99 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
       const res = await chatRouter.classifyTask('Hang test task');
       const elapsed = Date.now() - t0;
 
-      expect(res).toBeNull(); // Timed out gracefully
+      expect(res).toBeDefined();
+      expect(res?.forceEscalate).toBe(true); // Timed out gracefully, forced escalate
       expect(elapsed).toBeLessThan(4500); // Must be around 3s, not 10s
     } finally {
       if (origProvider) providerRegistry.register(origProvider);
+    }
+  });
+
+  test('Item 1.4: classifyTask structured probe parses conformant JSON schema fields', async () => {
+    const mockProbe: ProviderClient = {
+      providerName: 'mock-probe',
+      isAvailable: () => true,
+      async *streamResponse() {
+        yield { delta: JSON.stringify({ category: 'recon', planDepth: 3, is_ambiguous: false, confidence: 0.95 }) };
+      }
+    };
+    const orig = providerRegistry.get('gemini');
+    providerRegistry.register({ ...mockProbe, providerName: 'gemini' });
+
+    try {
+      const res = await chatRouter.classifyTask('scan ports on 10.0.0.1');
+      expect(res).toBeDefined();
+      expect(res?.category).toBe('recon');
+      expect(res?.planDepth).toBe(3);
+      expect(res?.is_ambiguous).toBe(false);
+      expect(res?.schema_conformant).toBe(true);
+      expect(res?.confidence).toBe(0.95);
+      expect(res?.forceEscalate).toBe(false);
+    } finally {
+      if (orig) providerRegistry.register(orig);
+    }
+  });
+
+  test('Item 1.5: classifyTask force-escalates on invalid JSON, ambiguous task, or low confidence', async () => {
+    // 1. Invalid JSON probe output
+    const brokenProbe: ProviderClient = {
+      providerName: 'mock-broken',
+      isAvailable: () => true,
+      async *streamResponse() {
+        yield { delta: 'Not valid json at all' };
+      }
+    };
+    const orig = providerRegistry.get('gemini');
+    providerRegistry.register({ ...brokenProbe, providerName: 'gemini' });
+
+    try {
+      const res = await chatRouter.classifyTask('some prompt');
+      expect(res).toBeDefined();
+      expect(res?.forceEscalate).toBe(true);
+
+      // Verify routing forces smart tier
+      const routeRes = chatRouter.route({ classification: res! });
+      expect(routeRes.primaryModel).not.toBe('local-engine');
+    } finally {
+      if (orig) providerRegistry.register(orig);
+    }
+
+    // 2. is_ambiguous: true
+    const ambiguousProbe: ProviderClient = {
+      providerName: 'mock-ambiguous',
+      isAvailable: () => true,
+      async *streamResponse() {
+        yield { delta: JSON.stringify({ category: 'general', planDepth: 2, is_ambiguous: true, confidence: 0.9 }) };
+      }
+    };
+    providerRegistry.register({ ...ambiguousProbe, providerName: 'gemini' });
+
+    try {
+      const res = await chatRouter.classifyTask('do whatever');
+      expect(res).toBeDefined();
+      expect(res?.is_ambiguous).toBe(true);
+      expect(res?.forceEscalate).toBe(true);
+    } finally {
+      if (orig) providerRegistry.register(orig);
+    }
+
+    // 3. Low confidence (< threshold)
+    const lowConfProbe: ProviderClient = {
+      providerName: 'mock-low-conf',
+      isAvailable: () => true,
+      async *streamResponse() {
+        yield { delta: JSON.stringify({ category: 'audit', planDepth: 3, is_ambiguous: false, confidence: 0.3 }) };
+      }
+    };
+    providerRegistry.register({ ...lowConfProbe, providerName: 'gemini' });
+
+    try {
+      const res = await chatRouter.classifyTask('audit system');
+      expect(res).toBeDefined();
+      expect(res?.confidence).toBe(0.3);
+      expect(res?.forceEscalate).toBe(true);
+    } finally {
+      if (orig) providerRegistry.register(orig);
     }
   });
 
