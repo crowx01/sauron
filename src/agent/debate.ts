@@ -14,12 +14,13 @@ export class DebateEngine {
     const catalog = chatRouter.getCatalog();
     const available = providerRegistry.getAvailableProviders();
     
-    // Pick 2 distinct models prioritizing available real providers
-    const candidateA = catalog.find((m) => available.includes(m.provider) && m.provider !== 'local-engine')
-      || catalog[0]
-      || { model: 'claude-cli', provider: 'claude-cli' };
+    // Pick 2 distinct models prioritizing available real providers. routable:false
+    // (Claude entries) is excluded — debate never auto-selects Claude; see router/index.ts policy note.
+    const candidateA = catalog.find((m) => m.routable && available.includes(m.provider) && m.provider !== 'local-engine')
+      || catalog.find((m) => m.routable)
+      || { model: 'local-engine', provider: 'local-engine' };
 
-    const candidateB = catalog.find((m) => m.model !== candidateA.model && (available.includes(m.provider) || m.provider === 'local-engine'))
+    const candidateB = catalog.find((m) => m.routable && m.model !== candidateA.model && (available.includes(m.provider) || m.provider === 'local-engine'))
       || { model: 'local-engine', provider: 'local-engine' };
 
     const promptMsgs: Message[] = [
