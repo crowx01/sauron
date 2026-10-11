@@ -1,3 +1,4 @@
+// @ts-ignore - bun:sqlite is built-in to the Bun runtime
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';

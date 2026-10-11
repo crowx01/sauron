@@ -254,6 +254,86 @@ describe('ChatRouter Meta-Controller & Extended Lessons Suite', () => {
   });
 
   // -------------------------------------------------------------
+  // ITEM 1.10: Self-Compiling Rule Miner & Local-Engine Matcher
+  // -------------------------------------------------------------
+  test('Item 1.10: RuleMiner promotes patterns with >=3 clean successes and 0 corrections', () => {
+    const { ruleMiner } = require('../src/router/rule_miner');
+    lessonStore.clear();
+
+    // 3 clean successes for the same prompt skeleton
+    for (let i = 0; i < 3; i++) {
+      lessonStore.record({
+        provider: 'openai',
+        model: 'gpt-4o',
+        taskCategory: 'recon',
+        success: true,
+        latencyMs: 100,
+        promptSkeleton: 'ping <slot:ip>'
+      });
+    }
+
+    const rules = ruleMiner.mineRules();
+    expect(rules.length).toBeGreaterThanOrEqual(1);
+    const rule = rules.find((r: any) => r.promptSkeleton === 'ping <slot:ip>');
+    expect(rule).toBeDefined();
+    expect(rule?.category).toBe('recon');
+
+    // Test matcher
+    const match = ruleMiner.matchCurrentRules('ping 192.168.1.1', 'recon');
+    expect(match.matched).toBe(true);
+    expect(match.ruleId).toBe(rule?.ruleId);
+  });
+
+  test('Item 1.11: User correction within 2 turns invalidates compiled rule on next miner run', () => {
+    const { ruleMiner } = require('../src/router/rule_miner');
+    lessonStore.clear();
+
+    // 3 clean successes
+    for (let i = 0; i < 3; i++) {
+      lessonStore.record({
+        provider: 'openai',
+        model: 'gpt-4o',
+        taskCategory: 'general',
+        success: true,
+        latencyMs: 100,
+        promptSkeleton: 'show status'
+      });
+    }
+
+    let rules = ruleMiner.mineRules();
+    expect(rules.some((r: any) => r.promptSkeleton === 'show status')).toBe(true);
+
+    // Turn 1: Rule-driven response
+    lessonStore.record({
+      provider: 'local-engine',
+      model: 'local-engine',
+      taskCategory: 'general',
+      success: true,
+      latencyMs: 10,
+      promptSkeleton: 'show status',
+      ruleDriven: true
+    });
+
+    // Turn 2: User correction
+    lessonStore.record({
+      provider: 'local-engine',
+      model: 'local-engine',
+      taskCategory: 'general',
+      success: false,
+      latencyMs: 10,
+      promptSkeleton: 'no that is wrong',
+      isCorrection: true
+    });
+
+    // Invalidation occurs on next miner run
+    rules = ruleMiner.mineRules();
+    expect(rules.some((r: any) => r.promptSkeleton === 'show status')).toBe(false);
+
+    const match = ruleMiner.matchCurrentRules('show status', 'general');
+    expect(match.matched).toBe(false);
+  });
+
+  // -------------------------------------------------------------
   // ITEM 2: Extended LessonStore Ledger & Recency-Weighted Bias
   // -------------------------------------------------------------
   test('Item 2.1: LessonStore tracks fuller ledger with latency, costRank, and taskCategory', () => {
