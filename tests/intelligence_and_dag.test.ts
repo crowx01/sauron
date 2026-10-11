@@ -131,4 +131,54 @@ describe('Sauron Intelligence & Autonomous Independence Suite', () => {
     expect(secondRunnable).not.toBeNull();
     expect(secondRunnable?.id).toBe('node_inspect');
   });
+
+  // Test 9: Plan/Execute split DAG request and topological execution
+  test('I9: requestPlanDAG parses strict JSON plan DAG from smart-tier model', async () => {
+    const { requestPlanDAG, isNonLinearTask } = require('../src/router/plan_dag');
+
+    expect(isNonLinearTask(4, 'general')).toBe(true);
+    expect(isNonLinearTask(1, 'general')).toBe(false);
+    expect(isNonLinearTask(2, 'codegen')).toBe(true);
+
+    const mockSmartClient = {
+      async *streamResponse() {
+        yield {
+          delta: JSON.stringify([
+            { id: '1', action: 'bash', args: { command: 'echo "hello"' }, dependsOn: [] },
+            { id: '2', action: 'bash', args: { command: 'echo "world"' }, dependsOn: ['1'] }
+          ])
+        };
+      }
+    };
+
+    const dag = await requestPlanDAG(mockSmartClient, 'gemini-3.1-pro-high', 'Run two commands');
+    expect(dag).toBeDefined();
+    expect(dag?.length).toBe(2);
+    expect(dag?.[0].id).toBe('1');
+    expect(dag?.[1].dependsOn).toContain('1');
+  });
+
+  test('I10: executePlanDAG runs DAG nodes in dependency order via local-engine toolBelt', async () => {
+    const { executePlanDAG } = require('../src/router/plan_dag');
+
+    const nodes = [
+      { id: 'step_b', action: 'bash', args: { command: 'echo "second"' }, dependsOn: ['step_a'] },
+      { id: 'step_a', action: 'bash', args: { command: 'echo "first"' }, dependsOn: [] }
+    ];
+
+    const chunks: string[] = [];
+    const execution = executePlanDAG(nodes);
+    let iter = await execution.next();
+    while (!iter.done) {
+      if (iter.value.delta) chunks.push(iter.value.delta);
+      iter = await execution.next();
+    }
+
+    const result = iter.value;
+    expect(result.success).toBe(true);
+    expect(result.nodesExecuted.length).toBe(2);
+    // Verified executed in topological order: step_a before step_b
+    expect(result.nodesExecuted[0].id).toBe('step_a');
+    expect(result.nodesExecuted[1].id).toBe('step_b');
+  });
 });
