@@ -10,6 +10,9 @@ export interface RouteOutcome {
   taskCategory?: string;
   costRank?: number;
   error?: string;
+  promptSkeleton?: string;
+  isCorrection?: boolean;
+  ruleDriven?: boolean;
   timestamp: number;
 }
 
@@ -77,10 +80,6 @@ export class LessonStore {
       timestamp: Date.now()
     };
     this.outcomes.push(entry);
-    if (this.outcomes.length > 500) {
-      this.outcomes.shift();
-    }
-
     // Cooldown management
     if (!outcome.success) {
       const errClass = classifyError(outcome.error);
@@ -103,6 +102,10 @@ export class LessonStore {
     }
 
     this.save();
+  }
+
+  public getRawOutcomes(): RouteOutcome[] {
+    return [...this.outcomes];
   }
 
   public getLedger(provider?: string, model?: string, taskCategory?: string): LedgerEntry[] {

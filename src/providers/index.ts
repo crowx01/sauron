@@ -166,6 +166,19 @@ export class LocalSessionProviderClient implements ProviderClient {
       }
     }
 
+    // Check compiled_rules before standard logic
+    const { ruleMiner } = await import('../router/rule_miner');
+    const ruleMatch = ruleMiner.matchCurrentRules(messages[messages.length - 1]?.content || '', options.taskCategory || 'general');
+    if (ruleMatch.matched && ruleMatch.response) {
+      const words = ruleMatch.response.split(' ');
+      for (const w of words) {
+        yield { delta: w + ' ', modelUsed: model, providerUsed: 'local-engine' };
+        if (signal?.aborted) return;
+        await abortableSleep(20, signal);
+      }
+      return;
+    }
+
     let answer = '';
     if (lastMsg.includes('your name') || lastMsg.includes('who are you')) {
       answer = "I am Sauron AI, an offensive-security orchestrator and multi-model assistant.";

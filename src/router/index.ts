@@ -11,9 +11,10 @@ import {
 import { computeBlastRadius, BlastRadiusResult } from './blast_radius';
 import { requestPlanDAG, executePlanDAG, isNonLinearTask, PlanNode, DAGExecutionResult } from './plan_dag';
 import { actionCache, ActionCache, templatePrompt } from './action_cache';
+import { ruleMiner, RuleMiner, CompiledRule, RuleMatchResult } from './rule_miner';
 
-export { STATIC_CATALOG, computeBlastRadius, requestPlanDAG, executePlanDAG, isNonLinearTask, actionCache };
-export type { BlastRadiusResult, PlanNode, DAGExecutionResult, ActionCache };
+export { STATIC_CATALOG, computeBlastRadius, requestPlanDAG, executePlanDAG, isNonLinearTask, actionCache, ruleMiner };
+export type { BlastRadiusResult, PlanNode, DAGExecutionResult, ActionCache, RuleMiner, CompiledRule, RuleMatchResult };
 
 export class ChatRouter {
   public defaultModel = 'gemini-3.1-pro-high';
@@ -144,7 +145,7 @@ export class ChatRouter {
     const escalationFallback: TaskClassification = {
       category: 'general',
       domain: 'general',
-      planDepth: 8,
+      planDepth: 1,
       ambiguity: 0.9,
       confidence: 0.1,
       is_ambiguous: true,
@@ -251,7 +252,7 @@ Task: ${promptText}`;
         return {
           category,
           domain: category,
-          planDepth: needsEscalation ? Math.max(planDepth, 7) : planDepth,
+          planDepth: planDepth,
           ambiguity: needsEscalation ? Math.max(ambiguity, 0.7) : ambiguity,
           confidence,
           is_ambiguous: isAmbiguous,
@@ -638,13 +639,16 @@ Task: ${promptText}`;
 
       if (target.provider !== 'local-engine') {
         const catEntry = this.catalog.find((m) => m.model === target.model && m.provider === target.provider);
+        const taskCat = options.taskCategory || classification?.category || 'general';
+        const skeleton = promptText ? templatePrompt(promptText).skeleton : undefined;
         lessonStore.record({
           model: target.model,
           provider: target.provider,
           success: !failure && hasOutput,
           latencyMs: Date.now() - startTime,
-          taskCategory: options.taskCategory || classification?.category || 'general',
+          taskCategory: taskCat,
           costRank: catEntry?.costRank ?? 1,
+          promptSkeleton: skeleton,
           error: failure
         });
       }
@@ -662,6 +666,10 @@ Task: ${promptText}`;
             modelUsed: target.model,
             dagOrToolSequence: collectedOutput
           });
+          // Opportunistically trigger background rule mining
+          try {
+            ruleMiner.mineRules();
+          } catch {}
         }
         return;
       }
