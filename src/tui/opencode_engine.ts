@@ -46,7 +46,7 @@ export class OpenCodeEngine {
   private isBusy = false;
   private sidebarVisible = true;
   private slashSelectedIndex = 0;
-  private mouseTrackingEnabled = true;
+  private mouseTrackingEnabled = false;
 
   private tabBar = new SessionTabBar();
   private sidebar = new SidebarPane();
@@ -65,8 +65,8 @@ export class OpenCodeEngine {
   public start() {
     if (this.isRaw) return;
 
-    // Enter alternate screen buffer, enable SGR 1000/1006 mouse tracking & hide cursor
-    process.stdout.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l');
+    // Enter alternate screen buffer & hide cursor (leave mouse selection native)
+    process.stdout.write('\x1b[?1049h\x1b[?25l');
 
     if (process.stdin.setRawMode) {
       process.stdin.setRawMode(true);
