@@ -104,7 +104,7 @@ export function OpenTUIApp() {
       if (modal === 'model_picker') {
         if (key.name === '1') { selectModel('claude-3-7-sonnet'); return; }
         if (key.name === '2') { selectModel('gpt-4o'); return; }
-        if (key.name === '3') { selectModel('gemini-2.0-flash'); return; }
+        if (key.name === '3') { selectModel('gemini-3.5-flash-lite'); return; }
         if (key.name === '4') { selectModel('claude-cli'); return; }
         if (key.name === '5') { selectModel('deepseek-r1'); return; }
       }
@@ -367,7 +367,7 @@ export function OpenTUIApp() {
       <Show when={prompt().startsWith('/') && activeModal() === 'none'}>
         <box flexDirection="column" width="100%" backgroundColor="#0284c7" padding={1}>
           <text color="#ffffff" bold> SLASH COMMAND AUTOCOMPLETE (Press Enter to execute) </text>
-          <text color="#e0f2fe"> /model [name]   - Select AI model (1: claude-3-7-sonnet, 2: gpt-4o, 3: gemini-2.0-flash) </text>
+          <text color="#e0f2fe"> /model [name]   - Select AI model (1: claude-3-7-sonnet, 2: gpt-4o, 3: gemini-3.5-flash-lite) </text>
           <text color="#e0f2fe"> /theme [name]   - Change UI theme (1: opencode-dark, 2: dracula, 3: catppuccin) </text>
           <text color="#e0f2fe"> /sessions       - Open sessions drawer </text>
           <text color="#e0f2fe"> /compact        - Compact context memory </text>
@@ -435,7 +435,7 @@ export function OpenTUIApp() {
           <text color="#64748b">────────────────────────────</text>
           <text color="#a855f7" bold> 1. claude-3-7-sonnet [Anthropic] </text>
           <text color="#e2e8f0"> 2. gpt-4o [OpenAI] </text>
-          <text color="#e2e8f0"> 3. gemini-2.0-flash [Gemini] </text>
+          <text color="#e2e8f0"> 3. gemini-3.5-flash-lite [Gemini] </text>
           <text color="#e2e8f0"> 4. claude-cli [Local CLI] </text>
           <text color="#e2e8f0"> 5. deepseek-r1 [DeepSeek] </text>
           <text color="#f87171"> Press 1-5 to pick model, or Escape to close </text>

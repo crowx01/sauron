@@ -335,7 +335,7 @@ export class GeminiProviderClient implements ProviderClient {
     }
 
     try {
-      const targetModel = model || 'gemini-2.0-flash';
+      const targetModel = model || 'gemini-3.5-flash-lite';
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
       const contents = messages.map((m) => ({

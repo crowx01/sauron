@@ -17,7 +17,7 @@ describe('Sauron CLI End-to-End Command Suite', () => {
     expect(res.status).toBe(0);
     expect(res.stdout).toContain('SAURON MODEL CATALOG');
     expect(res.stdout).toContain('claude-3-7-sonnet');
-    expect(res.stdout).toContain('gemini-2.0-flash');
+    expect(res.stdout).toContain('gemini-3.5-flash-lite');
   });
 
   test('CLI sessions command lists available saved sessions', () => {

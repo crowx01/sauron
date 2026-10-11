@@ -113,7 +113,7 @@ export class ChatRouter {
 
   /**
    * Fast cheap local classification step with hard cap ~3s.
-   * Prefers antigravity gemini-3.8-flash-low, then gemini-2.0-flash.
+   * Prefers antigravity gemini-3.8-flash-low, then gemini-3.5-flash-lite.
    * Returns task domain/category, estimated plan-step depth, and ambiguity/confidence score.
    * Degrades gracefully (returns null) if no cheap model is available or call fails/times out.
    */
@@ -124,12 +124,16 @@ export class ChatRouter {
     let cheapProvider: string | null = null;
     let cheapModel: string | null = null;
 
-    if (providerRegistry.get('antigravity')?.isAvailable()) {
+    // Direct API (gemini) preferred over antigravity here: `agy` is a ~200MB CLI binary with
+    // real process-spawn overhead, so it reliably blows the 3s classify budget and degrades to
+    // null on every call — defeating the point of a fast pre-dispatch probe. antigravity is a
+    // fine dispatch *target* (see route()'s normal candidate scoring), just not this fast-path.
+    if (providerRegistry.get('gemini')?.isAvailable()) {
+      cheapProvider = 'gemini';
+      cheapModel = 'gemini-3.5-flash-lite';
+    } else if (providerRegistry.get('antigravity')?.isAvailable()) {
       cheapProvider = 'antigravity';
       cheapModel = 'gemini-3.8-flash-low';
-    } else if (providerRegistry.get('gemini')?.isAvailable()) {
-      cheapProvider = 'gemini';
-      cheapModel = 'gemini-2.0-flash';
     }
 
     if (!cheapProvider || !cheapModel) {
@@ -296,7 +300,7 @@ Task: ${promptText}`;
       // reachable only via explicit `--model claude-cli` / `--model claude-3-7-sonnet` etc.
       if (mode === 'cheap') {
         if (available.includes('antigravity')) targetModel = 'gemini-3.8-flash-medium';
-        else if (available.includes('gemini')) targetModel = 'gemini-2.0-flash';
+        else if (available.includes('gemini')) targetModel = 'gemini-3.5-flash-lite';
         else if (available.includes('openai')) {
           targetModel = this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model === 'gpt-4o-mini')?.model
             ?? this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model.includes('mini'))?.model
@@ -309,7 +313,7 @@ Task: ${promptText}`;
           targetModel = this.catalog.find((m) => m.provider === 'openai' && m.routable && m.model === 'gpt-4o')?.model
             ?? this.catalog.filter((m) => m.provider === 'openai' && m.routable).sort((a, b) => b.intelligence - a.intelligence)[0]?.model
             ?? 'gpt-4o';
-        } else if (available.includes('gemini')) targetModel = 'gemini-2.0-flash';
+        } else if (available.includes('gemini')) targetModel = 'gemini-3.5-flash-lite';
         else targetModel = 'local-engine';
       } else {
         // Auto: combine plan-depth + ambiguity output from classifier with catalog intelligence
