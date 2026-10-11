@@ -8,8 +8,23 @@ export interface RouteOutcome {
   success: boolean;
   latencyMs: number;
   taskCategory?: string;
+  costRank?: number;
   error?: string;
   timestamp: number;
+}
+
+export interface LedgerEntry {
+  provider: string;
+  model: string;
+  taskCategory: string;
+  total: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+  avgLatency: number;
+  avgCostRank: number;
+  recentSuccessRate: number;
+  lastTimestamp: number;
 }
 
 export type ErrorClass = 'rate_limit' | 'transient' | 'persistent' | 'request';
@@ -57,6 +72,8 @@ export class LessonStore {
   public record(outcome: Omit<RouteOutcome, 'timestamp'>): void {
     const entry: RouteOutcome = {
       ...outcome,
+      taskCategory: outcome.taskCategory || 'general',
+      costRank: outcome.costRank ?? 1,
       timestamp: Date.now()
     };
     this.outcomes.push(entry);
@@ -88,12 +105,72 @@ export class LessonStore {
     this.save();
   }
 
-  public getStats(): Record<string, { total: number; successes: number; failures: number; avgLatency: number; successRate: number }> {
-    const stats: Record<string, { total: number; successes: number; failures: number; avgLatency: number; successRate: number }> = {};
+  public getLedger(provider?: string, model?: string, taskCategory?: string): LedgerEntry[] {
+    const map = new Map<string, RouteOutcome[]>();
+
+    for (const o of this.outcomes) {
+      if (provider && o.provider !== provider) continue;
+      if (model && o.model !== model) continue;
+      const cat = o.taskCategory || 'general';
+      if (taskCategory && cat !== taskCategory) continue;
+
+      const key = `${o.provider || 'unknown'}:${o.model}:${cat}`;
+      const list = map.get(key) || [];
+      list.push(o);
+      map.set(key, list);
+    }
+
+    const ledger: LedgerEntry[] = [];
+    const now = Date.now();
+
+    for (const [key, list] of map.entries()) {
+      const parts = key.split(':');
+      const p = parts[0];
+      const m = parts[1];
+      const cat = parts.slice(2).join(':');
+      const total = list.length;
+      const successes = list.filter((item) => item.success).length;
+      const failures = total - successes;
+      const successRate = total > 0 ? successes / total : 1.0;
+      const avgLatency = Math.round(list.reduce((acc, item) => acc + item.latencyMs, 0) / total);
+      const totalCostRank = list.reduce((acc, item) => acc + (item.costRank ?? 1), 0);
+      const avgCostRank = Math.round((totalCostRank / total) * 10) / 10;
+
+      let weightedSuccesses = 0;
+      let totalWeight = 0;
+      for (const item of list.slice(-10)) {
+        const ageMinutes = (now - item.timestamp) / 60000;
+        const weight = Math.max(0.1, Math.pow(0.5, ageMinutes / 15));
+        totalWeight += weight;
+        if (item.success) weightedSuccesses += weight;
+      }
+      const recentSuccessRate = totalWeight > 0 ? weightedSuccesses / totalWeight : successRate;
+      const lastTimestamp = Math.max(...list.map((item) => item.timestamp));
+
+      ledger.push({
+        provider: p,
+        model: m,
+        taskCategory: cat,
+        total,
+        successes,
+        failures,
+        successRate,
+        avgLatency,
+        avgCostRank,
+        recentSuccessRate,
+        lastTimestamp
+      });
+    }
+
+    return ledger;
+  }
+
+  public getStats(): Record<string, { total: number; successes: number; failures: number; avgLatency: number; successRate: number; avgCostRank?: number }> {
+    const stats: Record<string, { total: number; successes: number; failures: number; avgLatency: number; successRate: number; avgCostRank?: number }> = {};
 
     for (const o of this.outcomes) {
       if (!stats[o.model]) {
-        stats[o.model] = { total: 0, successes: 0, failures: 0, avgLatency: 0, successRate: 1.0 };
+        stats[o.model] = { total: 0, successes: 0, failures: 0, avgLatency: 0, successRate: 1.0, avgCostRank: 1 };
       }
       stats[o.model].total++;
       if (o.success) stats[o.model].successes++;
@@ -104,6 +181,9 @@ export class LessonStore {
       stats[o.model].successRate = stats[o.model].total > 0
         ? stats[o.model].successes / stats[o.model].total
         : 1.0;
+      stats[o.model].avgCostRank = Math.round(
+        (((stats[o.model].avgCostRank ?? 1) * (stats[o.model].total - 1) + (o.costRank ?? 1)) / stats[o.model].total) * 10
+      ) / 10;
     }
 
     return stats;
@@ -114,10 +194,15 @@ export class LessonStore {
       return 0.1;
     }
 
-    const recent = this.outcomes
-      .filter((o) => o.model === model)
-      .slice(-10);
+    let matching = this.outcomes.filter(
+      (o) => o.model === model && (!o.provider || !provider || o.provider === provider)
+    );
 
+    if (taskCategory && matching.some((o) => o.taskCategory === taskCategory)) {
+      matching = matching.filter((o) => o.taskCategory === taskCategory);
+    }
+
+    const recent = matching.slice(-10);
     if (recent.length === 0) return 1.0;
 
     const now = Date.now();
@@ -126,7 +211,7 @@ export class LessonStore {
 
     for (const o of recent) {
       const ageMinutes = (now - o.timestamp) / 60000;
-      const weight = Math.max(0.2, 1 - ageMinutes / 30);
+      const weight = Math.max(0.1, Math.pow(0.5, ageMinutes / 15));
       totalWeight += weight;
       if (o.success) weightedSuccesses += weight;
     }
