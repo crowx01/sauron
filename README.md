@@ -18,6 +18,7 @@
 - **Self-Healing Tool Resolution**: Automatic capability mapping and command mutation upon exit code 127 / "command not found" (`ps aux` $\rightarrow$ `ps -ef`, `ip addr` $\rightarrow$ `ifconfig -a`), persisting learned resolutions to `~/.sauron/resolutions.json`.
 - **Adaptive Mission Pipeline**: 3-stage Writer $\rightarrow$ Executor $\rightarrow$ Judge pipeline with hardened 30/40/30 scoring rubric (Exit status 30, Relevance 40, Completeness 30; PASS threshold $\ge 75$).
 - **Multi-Provider Catalog & Closed-Loop Learning**: Dynamic catalog across Anthropic, OpenAI, Gemini, OpenRouter, Cohere, xAI, and Azure with error classification taxonomy (`rate_limit`, `transient`, `persistent`, `request`), exponential backoff cooldowns, and closed-loop routing bias.
+- **Antigravity Provider (keyless)**: `antigravity` shells out to the already-authenticated `agy` CLI (`agy -p <prompt> --output-format text --model <id>`) — no API key. Gemini/GPT-OSS ids are auto-routable; `claude-sonnet-4-6` and `claude-opus-4-6-thinking` are explicit-selection only and never auto-routed.
 
 ---
 

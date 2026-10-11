@@ -2,6 +2,7 @@ import { Message, StreamChunk, RouterOptions } from '../types';
 import { configManager } from '../config';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { AntigravityProviderClient } from './antigravity';
 
 export interface ProviderClient {
   providerName: string;
@@ -346,7 +347,6 @@ export class GeminiProviderClient implements ProviderClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal,
-        signal,
         body: JSON.stringify({ contents })
       });
 
@@ -444,6 +444,7 @@ export class ProviderRegistry {
     this.register(new AnthropicProviderClient());
     this.register(new GeminiProviderClient());
     this.register(new OpenRouterProviderClient());
+    this.register(new AntigravityProviderClient());
   }
 
   public register(client: ProviderClient) {
