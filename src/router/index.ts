@@ -8,8 +8,10 @@ import {
   fetchDynamicCatalog,
   readDiskCache
 } from './catalog_fetch';
+import { computeBlastRadius, BlastRadiusResult } from './blast_radius';
 
-export { STATIC_CATALOG };
+export { STATIC_CATALOG, computeBlastRadius };
+export type { BlastRadiusResult };
 
 export class ChatRouter {
   public defaultModel = 'gemini-3.1-pro-high';
@@ -271,21 +273,34 @@ Task: ${promptText}`;
 
   /**
    * Combine classifier plan-depth + ambiguity with catalog intelligence,
-   * lessonStore bias, and costRank into a single composite complexity score.
+   * lessonStore bias, costRank, and workspace blast radius into a single composite complexity score.
    */
   public computeComplexityScore(
     candidate: ModelEntry,
     taskCategory: string,
-    classification?: TaskClassification
+    classification?: TaskClassification,
+    targetFiles?: string[]
   ): number {
     const bias = lessonStore.getBias(candidate.provider, candidate.model, taskCategory);
+
+    // Compute blast radius if file paths are referenced
+    let blastRadiusTerm = 0;
+    if (targetFiles && targetFiles.length > 0) {
+      const { score: blastScore } = computeBlastRadius(targetFiles);
+      // Normalized blast radius (0.0 to 1.0): higher blast radius increases complexity,
+      // weighting towards more capable/intelligent models
+      const normBlast = Math.min(1, blastScore / 10);
+      blastRadiusTerm = normBlast * 0.5;
+    }
+
     if (!classification) {
-      return candidate.intelligence * bias;
+      return (candidate.intelligence * (1 + blastRadiusTerm) * bias);
     }
 
     const normDepth = Math.max(1, Math.min(10, classification.planDepth || 1)) / 10;
     const normAmbiguity = Math.max(0, Math.min(1, classification.ambiguity ?? 0.2));
-    const complexity = normDepth * 0.6 + normAmbiguity * 0.4;
+    const baseComplexity = normDepth * 0.6 + normAmbiguity * 0.4;
+    const complexity = Math.min(1, baseComplexity + blastRadiusTerm);
 
     const intelligenceWeight = 0.7 + complexity * 0.6;
     const costPenalty = (1 - complexity) * (candidate.costRank * 4);
@@ -380,11 +395,12 @@ Task: ${promptText}`;
         // and lessonStore bias into one complexity score used for candidate ranking.
         // routable:false Claude-exclusion filtering is preserved untouched.
         const taskCategory = options.taskCategory || classification?.category || 'general';
+        const targetFiles = options.targetFiles;
         const candidates = this.catalog
           .filter((m) => m.routable && realAvailable.includes(m.provider))
           .sort((a, b) => {
-            const scoreA = this.computeComplexityScore(a, taskCategory, classification);
-            const scoreB = this.computeComplexityScore(b, taskCategory, classification);
+            const scoreA = this.computeComplexityScore(a, taskCategory, classification, targetFiles);
+            const scoreB = this.computeComplexityScore(b, taskCategory, classification, targetFiles);
             return scoreB - scoreA;
           });
 
@@ -447,8 +463,19 @@ Task: ${promptText}`;
       }
     }
 
+    // Extract referenced concrete file paths if not explicitly supplied
+    let targetFiles = options.targetFiles;
+    if (!targetFiles && messages && messages.length > 0) {
+      const userText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+      const fileMatches = userText.match(/(?:[\w\-./\\]+\.(?:[a-zA-Z0-9]+))\b/g);
+      if (fileMatches) {
+        targetFiles = Array.from(new Set(fileMatches));
+      }
+    }
+
     const routeRes = this.route({
       ...options,
+      targetFiles,
       classification: classification ?? undefined,
       taskCategory: options.taskCategory || classification?.category
     });
@@ -484,8 +511,20 @@ Task: ${promptText}`;
       }
     }
 
+    // Extract file paths from user message if targetFiles not explicitly provided
+    let targetFiles = options.targetFiles;
+    if (!targetFiles && messages && messages.length > 0) {
+      const userText = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+      // Regex match file paths like src/foo.ts, ./path/to/file.js, /abs/path, config.json etc.
+      const fileMatches = userText.match(/(?:[\w\-./\\]+\.(?:[a-zA-Z0-9]+))\b/g);
+      if (fileMatches) {
+        targetFiles = Array.from(new Set(fileMatches));
+      }
+    }
+
     const { primaryModel, primaryProvider, fallbacks } = this.route({
       ...options,
+      targetFiles,
       classification: classification ?? undefined,
       taskCategory: options.taskCategory || classification?.category
     });
