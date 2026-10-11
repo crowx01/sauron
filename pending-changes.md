@@ -85,6 +85,13 @@ Systematic verification of all source modules across `core/sauron/`, `core/clink
 
 - **Conclusion**: Zero load-bearing functionality is missing in `src/`. All capabilities are fully implemented in idiomatic TypeScript.
 
+---
+
+## Step 3: Deletion of Legacy Python Codebase and Environments
+- **Deleted `core/` entirely**: Removed 460 tracked legacy Python source files (`core/cli.py`, `core/server.py`, `core/providers/`, `core/clink/`, `core/sauron/`, `core/utils/`, `core/tools/`, `core/tests/`).
+- **Deleted Build Artifacts & Virtual Environments**: Purged `core/.sauron_venv/`, `core/venv/`, `core/__pycache__/`, `core/.pytest_cache/`, `core/pal_mcp_server.egg-info/`, freeing ~809MB of disk space.
+- **Deleted Runtime Data & Scratch Artifacts**: Purged `core/logs/`, `core/sessions/`, `core/reports/`, `core/notes/`, `core/analysis/`, `core/research/`, `core/ideas/`, and scratch shell scripts.
+- **Engine Integrity**: Live runtime remains 100% Bun/TypeScript under `src/` with entry point `bin/cli.js`.
 
 ---
 
