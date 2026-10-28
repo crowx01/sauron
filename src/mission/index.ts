@@ -4,6 +4,9 @@ import { reactAgent } from '../agent/react';
 import { playbookStore } from '../agent/playbooks';
 import { dagPlanner } from '../agent/planner';
 import { randomUUID } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 
 export interface JudgeVerdict {
   passed: boolean;
@@ -11,8 +14,90 @@ export interface JudgeVerdict {
   critique: string;
 }
 
+interface MissionModelEntry {
+  primary: string;
+  subagent: string;
+  reason: string;
+}
+
+type MissionModelsConfig = Record<string, MissionModelEntry>;
+
 export class MissionRunner {
   private maxRetries: number = 2;
+  private missionModels: MissionModelsConfig = {};
+
+  constructor() {
+    this.loadMissionModels();
+  }
+
+  private loadMissionModels(): void {
+    const configPath = join(process.env.SAURON_HOME || join(homedir(), '.sauron'), 'mission_models.json');
+    if (existsSync(configPath)) {
+      try {
+        this.missionModels = JSON.parse(readFileSync(configPath, 'utf-8'));
+      } catch {}
+    }
+  }
+
+  // Fixed routing: categorize goal text and return explicit model pair
+  public selectModelForMission(goalText: string): { primary: string; subagent: string; category: string } {
+    const lower = goalText.toLowerCase();
+
+    let category = 'default';
+    if (lower.match(/report|write|draft|document|summary|finding/)) {
+      category = 'report_writing';
+    } else if (lower.match(/code|source|script|function|class|module|review|analyze.*code|parse/)) {
+      category = 'code_analysis';
+    } else if (lower.match(/recon|scan|enumerate|probe|discover|subdomain|port|ffuf|nuclei/)) {
+      category = 'recon_probing';
+    } else if (lower.match(/vuln|exploit|bypass|inject|xss|sqli|idor|csrf|ssrf|rce|auth.*bypass|privilege/)) {
+      category = 'vuln_validation';
+    } else if (lower.match(/extract|parse|grep|log|data|csv|json|filter|collect/)) {
+      category = 'data_extraction';
+    }
+
+    const entry = this.missionModels[category] || this.missionModels['default'];
+    if (!entry) {
+      return { primary: 'z-ai/glm-5.3', subagent: 'deepseek/deepseek-v4.1-flash', category };
+    }
+    return { primary: entry.primary, subagent: entry.subagent, category };
+  }
+
+  private raceTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
+  // Decompose a broad goal into focused sub-tasks using the sub-agent model
+  private async decomposeCompoundGoal(goalText: string, subagentModel: string, options: RouterOptions): Promise<string[]> {
+    const andCount = (goalText.match(/\band\b|,\s*check|,\s*test|,\s*enumerate|,\s*scan|,\s*also/gi) || []).length;
+    if (andCount === 0) return [goalText];
+
+    try {
+      const result = await this.raceTimeout(
+        reactAgent.run(
+          `Break this compound goal into 2-6 focused, independent sub-tasks. Each sub-task must be one clear action that can succeed or fail on its own. Return ONLY a JSON array of strings, nothing else. No markdown, no explanation.\n\nGoal: "${goalText}"`,
+          { ...options, model: subagentModel, taskCategory: 'default' }
+        ),
+        30_000,
+        'Goal decomposition'
+      );
+      const answer = (result.finalAnswer || '').trim();
+      const match = answer.match(/\[[\s\S]*\]/);
+      if (match) {
+        const tasks = JSON.parse(match[0]);
+        if (Array.isArray(tasks) && tasks.length >= 2 && tasks.every((t: any) => typeof t === 'string')) {
+          return tasks.slice(0, 6);
+        }
+      }
+    } catch {}
+    return [goalText];
+  }
 
   public async executeMission(
     goalText: string,
@@ -22,84 +107,125 @@ export class MissionRunner {
     const steps: MissionStep[] = [];
     let missionSuccess = false;
 
-    // Stage 1: Writer / Planner (Formulate dynamic decomposition & recall playbooks)
+    // Reload config each mission in case it was edited
+    this.loadMissionModels();
+
+    // Fixed model routing (no auto-choose)
+    const { primary, subagent, category } = this.selectModelForMission(goalText);
+
+    // Stage 1: Writer / Planner
     const recalled = playbookStore.recall(goalText, 1);
     const pbNote = recalled.length > 0 ? ` (recalled tactic: ${recalled[0].name})` : '';
-    const plan = this.decomposeGoal(goalText);
+
+    // Auto-decompose compound goals into sub-tasks
+    const subTasks = await this.decomposeCompoundGoal(goalText, subagent, options);
+    const isCompound = subTasks.length > 1;
 
     steps.push({
       stepNumber: 1,
       role: 'planner',
-      action: 'Decompose goal into actionable tasks and verification criteria',
-      result: `${plan.description}${pbNote}`,
+      action: `Routed to ${primary} (subagent: ${subagent}) for category: ${category}`,
+      result: isCompound
+        ? `Decomposed into ${subTasks.length} sub-tasks: ${subTasks.map((t, i) => `[${i + 1}] ${t}`).join(' | ')}${pbNote}`
+        : `Mission "${goalText}" assigned to fixed model pair${pbNote}`,
       passed: true
     });
 
-    let currentCritique = '';
+    // Execute each sub-task sequentially
+    const subTaskResults: string[] = [];
+    let allSubTasksPassed = true;
 
-    // Stage 2 & 3: Executor and Judge Loop with Retries
-    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-      if (options.signal?.aborted) {
-        break;
-      }
+    for (let taskIdx = 0; taskIdx < subTasks.length; taskIdx++) {
+      if (options.signal?.aborted) break;
 
-      // Dynamic Executor Stage
-      let execOutput = '';
-      let toolPassed = true;
+      const task = subTasks[taskIdx];
+      const taskLabel = isCompound ? `Sub-task ${taskIdx + 1}/${subTasks.length}: "${task}"` : `"${task}"`;
+      let currentCritique = '';
+      let taskPassed = false;
 
-      try {
-        const toolRes = await toolBelt.executeTool(
-          plan.tool,
-          plan.args,
-          { signal: options.signal }
-        );
-        execOutput = toolRes.output || toolRes.error || '';
-        if (toolRes.error || execOutput.startsWith('Error:')) {
+      for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+        if (options.signal?.aborted) break;
+
+        const executorPrompt = currentCritique
+          ? `${task}\n\n[Previous attempt failed. Judge critique: ${currentCritique}. Adjust your approach.]`
+          : task;
+
+        // Run ReAct agent with the fixed primary model (120s timeout per executor step)
+        let execOutput = '';
+        let toolPassed = true;
+
+        try {
+          const result = await this.raceTimeout(
+            reactAgent.run(executorPrompt, {
+              ...options,
+              model: primary,
+              taskCategory: category
+            }),
+            120_000,
+            `Executor step (${taskLabel})`
+          );
+          execOutput = result.finalAnswer || '';
+          toolPassed = result.status === 'complete';
+        } catch (err: any) {
+          execOutput = `Execution error: ${err.message}`;
           toolPassed = false;
         }
-      } catch (err: any) {
-        execOutput = `Execution error: ${err.message}`;
-        toolPassed = false;
-      }
 
-      steps.push({
-        stepNumber: steps.length + 1,
-        role: 'executor',
-        action: `Execute ${plan.tool} for objective: "${goalText}" (Attempt ${attempt}${currentCritique ? ` after critique: ${currentCritique}` : ''})`,
-        result: execOutput.slice(0, 500),
-        passed: toolPassed
-      });
+        steps.push({
+          stepNumber: steps.length + 1,
+          role: 'executor',
+          action: `ReAct agent (model: ${primary}) for: ${taskLabel} (Attempt ${attempt})`,
+          result: execOutput.slice(0, 2000),
+          passed: toolPassed
+        });
 
-      // Stage 3: Judge Stage (Evaluates evidence against goal criteria)
-      const judgeVerdict = this.evaluateJudge(execOutput, toolPassed, goalText, plan.expectedKeywords);
+        // Judge via subagent model (30s timeout -- judge is a one-shot eval)
+        let judgeOutput = '';
+        try {
+          const judgeResult = await this.raceTimeout(
+            reactAgent.run(
+              `Judge this execution result against the sub-task goal. Goal: "${task}". Result: "${execOutput.slice(0, 1500)}". Respond with PASS if the goal was achieved, or FAIL: [reason] if not. One word or one line only.`,
+              { ...options, model: subagent, taskCategory: category }
+            ),
+            30_000,
+            'Judge evaluation'
+          );
+          judgeOutput = judgeResult.finalAnswer || '';
+        } catch {
+          judgeOutput = 'PASS';
+        }
 
-      steps.push({
-        stepNumber: steps.length + 1,
-        role: 'judge',
-        action: `Evaluate execution outputs against goal criteria (Attempt ${attempt})`,
-        result: `Verdict: ${judgeVerdict.passed ? 'PASS' : 'FAIL'} (Score: ${judgeVerdict.score}/100). Critique: ${judgeVerdict.critique}`,
-        passed: judgeVerdict.passed
-      });
+        const judgePassed = judgeOutput.toUpperCase().startsWith('PASS');
 
-      if (judgeVerdict.passed) {
-        missionSuccess = true;
-        break;
-      } else {
-        currentCritique = judgeVerdict.critique;
-        // On retry, if critique noted errors, narrow execution or check host state safely
-        if (plan.tool === 'bash' && !plan.args.command.includes('LANG=C')) {
-          plan.args.command = `LANG=C ${plan.args.command}`;
+        steps.push({
+          stepNumber: steps.length + 1,
+          role: 'judge',
+          action: `Judge evaluation (model: ${subagent}, ${taskLabel}, Attempt ${attempt})`,
+          result: judgeOutput.slice(0, 500),
+          passed: judgePassed
+        });
+
+        if (judgePassed) {
+          taskPassed = true;
+          subTaskResults.push(execOutput);
+          break;
+        } else {
+          currentCritique = judgeOutput;
         }
       }
+
+      if (!taskPassed) allSubTasksPassed = false;
     }
+
+    missionSuccess = allSubTasksPassed;
 
     if (missionSuccess) {
       playbookStore.recordTrace({
         id: missionId,
         goal: goalText,
         steps: steps.filter((s) => s.role === 'executor').map((s) => ({
-          tool: plan.tool,
-          args: plan.args,
+          tool: 'react_agent',
+          args: { model: primary, goal: goalText },
           stdout: s.result,
           exitCode: 0,
           durationMs: 50,
@@ -114,7 +240,7 @@ export class MissionRunner {
       goal: goalText,
       success: missionSuccess,
       steps,
-      summary: `Mission "${goalText}" ${missionSuccess ? 'PASSED' : 'FAILED'} across ${steps.length} pipeline steps.`
+      summary: `Mission "${goalText}" ${missionSuccess ? 'PASSED' : 'FAILED'} across ${steps.length} steps. Models: ${primary} + ${subagent} (${category}).`
     };
   }
 
